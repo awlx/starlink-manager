@@ -1111,3 +1111,49 @@ func TestNonFiniteDishValuesStayPersistable(t *testing.T) {
 		}
 	}
 }
+
+func TestRecoveryProbeFailsOnceLatchesImmediately(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	clock := &fakeClock{now: time.Now()}
+	s := newTestSession(t, ts, clock)
+	oldCooldown := deadCooldown
+	deadCooldown = time.Minute
+	t.Cleanup(func() { deadCooldown = oldCooldown })
+
+	// Two failed probes latch normally (transient-failure tolerance).
+	f.mu.Lock()
+	f.probeStatus = 401
+	f.mu.Unlock()
+	_, _ = s.Token(context.Background())
+	if s.SessionDead() {
+		t.Fatal("single transient failure must not latch")
+	}
+	clock.Advance(probeMinInterval + time.Second)
+	_, _ = s.Token(context.Background())
+	if !s.SessionDead() {
+		t.Fatal("two consecutive failures must latch")
+	}
+
+	// After the cooldown one failed recovery probe latches again
+	// immediately (one strike) instead of requiring another two.
+	clock.Advance(2 * time.Minute)
+	_, err := s.Token(context.Background())
+	if err == nil {
+		t.Fatal("expected failed recovery probe")
+	}
+	if !s.SessionDead() {
+		t.Fatal("one failed post-cooldown probe must re-latch")
+	}
+
+	// A successful recovery probe recovers.
+	clock.Advance(2 * time.Minute)
+	f.mu.Lock()
+	f.probeStatus = 200
+	f.mu.Unlock()
+	if _, err := s.Token(context.Background()); err != nil {
+		t.Fatalf("recovery probe failed: %v", err)
+	}
+	if s.SessionDead() {
+		t.Fatal("session should be recovered")
+	}
+}
