@@ -84,23 +84,35 @@
     });
 
     var d = "";
+    var paths = [];
     series.forEach(function (p, i) {
       var px = x(p.t), py = y(p.v);
-      if (!i) { d = "M" + px + " " + py; return; }
+      if (!i) { paths.push("M" + px + " " + py); return; }
       var prev = series[i - 1];
+      // Offline gaps (>2 minutes between samples) break the line instead of
+      // drawing a misleading bridge across missing data.
+      if (p.t - prev.t > 120) { paths.push("M" + px + " " + py); return; }
+      var cur = paths[paths.length - 1];
       if (opts.binary) {
-        d += "H" + px + "V" + py;
+        paths[paths.length - 1] = cur + "H" + px + "V" + py;
       } else {
         // Horizontal control tangents soften the line without overshooting values.
         var mid = (x(prev.t) + px) / 2;
-        d += "C" + mid + " " + y(prev.v) + " " + mid + " " + py + " " + px + " " + py;
+        paths[paths.length - 1] = cur + "C" + mid + " " + y(prev.v) + " " + mid + " " + py + " " + px + " " + py;
       }
     });
+    d = paths.join(" ");
     var gradientID = "fill-" + svg.dataset.chart;
     var gradient = node("linearGradient", { id: gradientID, x1: "0", y1: "0", x2: "0", y2: "1" }, node("defs", {}));
     node("stop", { offset: "0%", "stop-color": opts.color, "stop-opacity": ".22" }, gradient);
     node("stop", { offset: "100%", "stop-color": opts.color, "stop-opacity": ".01" }, gradient);
-    node("path", { d: d + "L" + x(series[series.length - 1].t) + " " + (H - padB) + "L" + x(series[0].t) + " " + (H - padB) + "Z", fill: "url(#" + gradientID + ")" });
+    node("path", { d: paths.map(function (seg) {
+      // Close each continuous segment to the baseline so offline gaps do
+      // not get an area fill bridging across them.
+      var m = seg.match(/^M(\S+) (\S+)/);
+      if (!m) return "";
+      return seg + "L" + m[1] + " " + (H - padB) + "Z";
+    }).join(" "), fill: "url(#" + gradientID + ")" });
     node("path", { d: d, fill: "none", stroke: opts.color, "stroke-width": 1.8, "stroke-linecap": "round", "stroke-linejoin": "round", "vector-effect": "non-scaling-stroke" });
     if (series.length === 1) node("circle", { cx: x(series[0].t), cy: y(series[0].v), r: 3, fill: opts.color });
 
