@@ -76,7 +76,10 @@ type Device struct {
 // status. History is aggregated across polls using the dish history cursor
 // and persisted to a JSON file in the data dir so charts survive restarts.
 type Store struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// saveMu serializes Save: concurrent saves would share the temp file
+	// and could rename a truncated or interleaved payload into place.
+	saveMu  sync.Mutex
 	devices map[string]*Device
 	window  time.Duration
 	dataDir string
@@ -158,6 +161,8 @@ const persistedSampleCap = 90_000
 // directory entry is fsynced before the dirty flag is cleared, so a crash
 // cannot leave an empty or truncated store.
 func (s *Store) Save() error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
 	s.mu.Lock()
 	if err := os.MkdirAll(s.dataDir, 0o755); err != nil {
 		s.mu.Unlock()

@@ -1048,3 +1048,34 @@ func TestStatusFromResponseUnreportedFields(t *testing.T) {
 		t.Fatalf("reported state/snr mapped to %q / %v", st.State, st.SNR)
 	}
 }
+
+func TestStoreConcurrentSaves(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, 24*time.Hour, nil)
+	for i := 0; i < 50; i++ {
+		s.UpsertDevice(&Device{ID: fmt.Sprintf("ut%02d", i), Kind: KindDish, Name: strings.Repeat("x", 2000)})
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- s.Save()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Save: %v", err)
+		}
+	}
+	loaded := NewStore(dir, 24*time.Hour, nil)
+	if err := loaded.Load(); err != nil {
+		t.Fatalf("Load after concurrent saves: %v", err)
+	}
+	if n := len(loaded.Devices()); n != 50 {
+		t.Fatalf("loaded %d devices, want 50", n)
+	}
+}

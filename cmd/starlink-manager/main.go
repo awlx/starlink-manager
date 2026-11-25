@@ -112,10 +112,9 @@ func run() error {
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			log.Error("graceful shutdown failed", "err", err)
 		}
-		// Persist history one last time on shutdown.
-		if err := store.Save(); err != nil {
-			log.Error("saving history on shutdown failed", "err", err)
-		}
+		// Stop the poller first: it persists history one last time once
+		// its final round is done, so nothing is written after that save.
+		poller.Stop()
 		return nil
 	}
 }
