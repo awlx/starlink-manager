@@ -85,6 +85,17 @@ main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; }
 .pill-ok { background: rgba(53,181,122,.15); color: var(--ok); }
 .pill-warn { background: rgba(232,163,61,.15); color: var(--warn); }
 .pill-error { background: rgba(224,82,82,.15); color: var(--error); }
+.pill-muted { background: rgba(120,135,150,.15); color: var(--fg-muted); }
+.obstruction-line { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.obstruction-bar {
+  display: inline-block; width: 160px; height: 8px; border-radius: 4px;
+  background: #2a3442; overflow: hidden;
+}
+.obstruction-fill { display: block; height: 100%; }
+.obstruction-fill.pill-ok { background: var(--ok); }
+.obstruction-fill.pill-warn { background: var(--warn); }
+.obstruction-fill.pill-error { background: var(--error); }
+.obstruction-fill.pill-muted { background: var(--fg-muted); }
 .alerts { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
 .alerts:empty { display: none; }
 

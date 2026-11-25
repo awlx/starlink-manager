@@ -99,8 +99,21 @@
     downlink: { title: "Downlink throughput", color: "#35b57a", fmt: fmtBytes,
                 pick: function (s) { return { t: s.ts, v: s.downBps }; }, summary: function (a) { return avgSum(a, function (s) { return fmtBytes(s.downBps); }); } },
     uplink:   { title: "Uplink throughput", color: "#f5c211", fmt: fmtBytes,
-                pick: function (s) { return { t: s.ts, v: s.upBps }; }, summary: function (a) { return avgSum(a, function (s) { return fmtBytes(s.upBps); }); } }
+                pick: function (s) { return { t: s.ts, v: s.upBps }; }, summary: function (a) { return avgSum(a, function (s) { return fmtBytes(s.upBps); }); } },
+    obstruction: { title: "Obstruction", color: "#e05252", fmt: function (v) { return v.toFixed(0); },
+                pick: function (s) { return { t: s.ts, v: s.obstructed ? 1 : 0 }; },
+                summary: function (a) { return fractionSummary(a, "of samples obstructed"); } },
+    scheduled: { title: "Scheduled (boresight) windows", color: "#f5a33d", fmt: function (v) { return v.toFixed(0); },
+                pick: function (s) { return { t: s.ts, v: s.scheduled ? 1 : 0 }; },
+                summary: function (a) { return fractionSummary(a, "of samples scheduled"); } }
   };
+
+  function fractionSummary(arr, label) {
+    if (!arr.length) return "no samples";
+    var n = 0;
+    arr.forEach(function (v) { n += v; });
+    return (100 * n / arr.length).toFixed(1) + "% " + label;
+  }
 
   function avgSum(arr, fmt) {
     if (!arr.length) return "no samples";
@@ -168,6 +181,8 @@
             el.innerHTML = (dev.alerts || []).map(function (a) {
               return '<span class="pill pill-warn">' + esc(a) + "</span>";
             }).join("");
+          } else if (f === "obstruction") {
+            el.innerHTML = '<span class="pill ' + (dev.obstructionClass || "pill-muted") + '">' + esc(dev.obstruction) + "</span>";
           } else {
             el.textContent = dev[f];
           }

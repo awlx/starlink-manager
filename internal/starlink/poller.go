@@ -284,6 +284,7 @@ func statusFromResponse(kind DeviceKind, resp *device.Response) *DeviceStatus {
 		UplinkThroughput:    float64(dish.GetUplinkThroughputBps()),
 		ObstructionFraction: float64(obs.GetFractionObstructed()),
 		ObstructionValidS:   float64(obs.GetValidS()),
+		ObstructionLast24hS: float64(obs.GetLast_24HObstructedS()),
 		CurrentlyObstructed: obs.GetCurrentlyObstructed(),
 		StowRequested:       dish.GetStowRequested(),
 		Alerts:              alerts,
@@ -296,12 +297,12 @@ func alertFields(a *device.DishAlerts) map[string]bool {
 		return nil
 	}
 	return map[string]bool{
-		"motors_stuck":          a.GetMotorsStuck(),
-		"thermal_shutdown":      a.GetThermalShutdown(),
-		"thermal_throttle":      a.GetThermalThrottle(),
+		"motors_stuck":           a.GetMotorsStuck(),
+		"thermal_shutdown":       a.GetThermalShutdown(),
+		"thermal_throttle":       a.GetThermalThrottle(),
 		"mast_not_near_vertical": a.GetMastNotNearVertical(),
-		"unexpected_location":   a.GetUnexpectedLocation(),
-		"slow_ethernet_speeds":  a.GetSlowEthernetSpeeds(),
+		"unexpected_location":    a.GetUnexpectedLocation(),
+		"slow_ethernet_speeds":   a.GetSlowEthernetSpeeds(),
 	}
 }
 

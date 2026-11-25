@@ -20,7 +20,7 @@
       <dt>Kind</dt><dd>{{.KindLabel}}{{if .Nickname}} · {{.Nickname}}{{end}}</dd>
       <dt>State</dt><dd data-field="state">{{.StateLabel}}</dd>
       <dt>SNR / signal</dt><dd data-field="snr">{{.SNRText}}</dd>
-      <dt>Obstruction</dt><dd data-field="obstruction">{{.ObstructionText}}</dd>
+      <dt>Obstruction</dt><dd data-field="obstruction"><span class="pill {{.ObstructionClass}}">{{.ObstructionText}}</span></dd>
       <dt>Versions</dt><dd data-field="versions">{{.VersionsText}}</dd>
       <dt>Service</dt><dd>{{.ServiceLineName}}</dd>
     </dl>

@@ -14,26 +14,27 @@ import (
 	"github.com/awlx/starlink-manager/internal/auth"
 	"github.com/awlx/starlink-manager/internal/config"
 	"github.com/awlx/starlink-manager/internal/starlink"
+	"google.golang.org/protobuf/proto"
 )
 
 func testConfig(t *testing.T) *config.Config {
 	t.Helper()
 	return &config.Config{
-		ListenAddr:            ":0",
-		StarlinkAPIBaseURL:    "https://api.example.test",
-		StarlinkWebBaseURL:    "https://www.example.test",
-		StarlinkSSOCookie:     "test-sso",
-		PollInterval:          30 * time.Second,
-		HistoryWindow:         24 * time.Hour,
-		CallTimeout:           5 * time.Second,
-		DataDir:               t.TempDir(),
-		RosterCacheTTL:        5 * time.Minute,
-		TelemetryTTLOnline:    5 * time.Minute,
-		AuthMode:              config.AuthModeLocalDev,
-		LocalDevUser:          true,
-		OIDCAdminGroups:       []string{"ffmuc-admin"},
-		OIDCAdminClaim:        "groups",
-		SessionCookieSecret:   []byte(strings.Repeat("s", 32)),
+		ListenAddr:          ":0",
+		StarlinkAPIBaseURL:  "https://api.example.test",
+		StarlinkWebBaseURL:  "https://www.example.test",
+		StarlinkSSOCookie:   "test-sso",
+		PollInterval:        30 * time.Second,
+		HistoryWindow:       24 * time.Hour,
+		CallTimeout:         5 * time.Second,
+		DataDir:             t.TempDir(),
+		RosterCacheTTL:      5 * time.Minute,
+		TelemetryTTLOnline:  5 * time.Minute,
+		AuthMode:            config.AuthModeLocalDev,
+		LocalDevUser:        true,
+		OIDCAdminGroups:     []string{"ffmuc-admin"},
+		OIDCAdminClaim:      "groups",
+		SessionCookieSecret: []byte(strings.Repeat("s", 32)),
 	}
 }
 
@@ -304,6 +305,90 @@ func (middlewareFunc) Routes(*http.ServeMux)                       {}
 func (middlewareFunc) LogoutURL() string                           { return "/" }
 
 var _ auth.Authenticator = middlewareFunc(nil)
+
+func TestObstructionClassThresholds(t *testing.T) {
+	cases := []struct {
+		frac      float64
+		currently bool
+		want      string
+	}{
+		{0.001, false, "pill-ok"},
+		{0.019, false, "pill-ok"},
+		{0.02, false, "pill-warn"},
+		{0.05, false, "pill-warn"},
+		{0.10, false, "pill-warn"},
+		{0.101, false, "pill-error"},
+		{0.004, true, "pill-error"},
+	}
+	for _, c := range cases {
+		got := obstructionClass(&starlink.DeviceStatus{
+			ObstructionFraction: c.frac,
+			CurrentlyObstructed: c.currently,
+		})
+		if got != c.want {
+			t.Errorf("obstructionClass(%v, %v) = %q, want %q", c.frac, c.currently, got, c.want)
+		}
+	}
+}
+
+func TestDevicePageObstructionBadge(t *testing.T) {
+	srv, ts := newTestServer(t)
+	seedDevice(t, srv.store)
+	resp, err := http.Get(ts.URL + "/device/ut1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("device page status = %d", resp.StatusCode)
+	}
+	for _, want := range []string{"obstruction-fill", "pill-ok", "0.3%"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("device page missing %q", want)
+		}
+	}
+	// seedDevice: 0.3% obstruction, not currently obstructed → green badge.
+	if !strings.Contains(html, "obstruction-bar") {
+		t.Error("device page missing obstruction bar")
+	}
+}
+
+func TestHistoryIncludesObstructionFields(t *testing.T) {
+	srv, ts := newTestServer(t)
+	d := seedDevice(t, srv.store)
+	now := time.Now().Unix()
+	srv.store.AppendHistory(d.ID, &device.DishGetHistoryResponse{
+		Current:          proto.Uint64(uint64(now)),
+		PopPingLatencyMs: []float32{40, 41},
+		Scheduled:        []bool{false, true},
+		Obstructed:       []bool{true, false},
+	})
+	resp, err := http.Get(ts.URL + "/api/device/ut1234/history?window=1h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Samples []map[string]any `json:"samples"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Samples) != 2 {
+		t.Fatalf("samples = %d, want 2", len(body.Samples))
+	}
+	if body.Samples[0]["obstructed"] != true {
+		t.Errorf("sample 0 obstructed = %v, want true", body.Samples[0]["obstructed"])
+	}
+	if body.Samples[1]["scheduled"] != true {
+		t.Errorf("sample 1 scheduled = %v, want true", body.Samples[1]["scheduled"])
+	}
+}
 
 func readAll(t *testing.T, resp *http.Response) string {
 	t.Helper()

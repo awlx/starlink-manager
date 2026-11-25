@@ -25,43 +25,44 @@ type Sample struct {
 
 // DeviceStatus is the latest snapshot fetched through the device gateway.
 type DeviceStatus struct {
-	FetchedAt            time.Time        `json:"fetchedAt"`
-	HardwareVersion      string           `json:"hardwareVersion,omitempty"`
-	SoftwareVersion      string           `json:"softwareVersion,omitempty"`
-	State                string           `json:"state,omitempty"`
-	UptimeS              uint64           `json:"uptimeS,omitempty"`
-	SNR                  float64          `json:"snr,omitempty"`
-	PopPingLatencyMs     float64          `json:"popPingLatencyMs,omitempty"`
-	PopPingDropRate      float64          `json:"popPingDropRate,omitempty"`
-	DownlinkThroughput   float64          `json:"downlinkBps,omitempty"`
-	UplinkThroughput     float64          `json:"uplinkBps,omitempty"`
-	ObstructionFraction  float64          `json:"obstructionFraction,omitempty"`
-	ObstructionValidS    float64          `json:"obstructionValidS,omitempty"`
-	CurrentlyObstructed  bool             `json:"currentlyObstructed,omitempty"`
-	StowRequested        bool             `json:"stowRequested,omitempty"`
-	Alerts               map[string]bool  `json:"alerts,omitempty"`
-	Wifi                 *WifiStatusExtra `json:"wifi,omitempty"`
+	FetchedAt           time.Time        `json:"fetchedAt"`
+	HardwareVersion     string           `json:"hardwareVersion,omitempty"`
+	SoftwareVersion     string           `json:"softwareVersion,omitempty"`
+	State               string           `json:"state,omitempty"`
+	UptimeS             uint64           `json:"uptimeS,omitempty"`
+	SNR                 float64          `json:"snr,omitempty"`
+	PopPingLatencyMs    float64          `json:"popPingLatencyMs,omitempty"`
+	PopPingDropRate     float64          `json:"popPingDropRate,omitempty"`
+	DownlinkThroughput  float64          `json:"downlinkBps,omitempty"`
+	UplinkThroughput    float64          `json:"uplinkBps,omitempty"`
+	ObstructionFraction float64          `json:"obstructionFraction,omitempty"`
+	ObstructionValidS   float64          `json:"obstructionValidS,omitempty"`
+	ObstructionLast24hS float64          `json:"obstructionLast24hS,omitempty"`
+	CurrentlyObstructed bool             `json:"currentlyObstructed,omitempty"`
+	StowRequested       bool             `json:"stowRequested,omitempty"`
+	Alerts              map[string]bool  `json:"alerts,omitempty"`
+	Wifi                *WifiStatusExtra `json:"wifi,omitempty"`
 }
 
 // WifiStatusExtra carries router-specific status fields.
 type WifiStatusExtra struct {
-	SerialNumber    string  `json:"serialNumber,omitempty"`
-	SKU             string  `json:"sku,omitempty"`
-	IPv4WANAddress  string  `json:"ipv4WanAddress,omitempty"`
-	PingDropRate    float64 `json:"pingDropRate,omitempty"`
-	PingLatencyMs   float64 `json:"pingLatencyMs,omitempty"`
-	CaptivePortal   bool    `json:"captivePortalEnabled,omitempty"`
+	SerialNumber   string  `json:"serialNumber,omitempty"`
+	SKU            string  `json:"sku,omitempty"`
+	IPv4WANAddress string  `json:"ipv4WanAddress,omitempty"`
+	PingDropRate   float64 `json:"pingDropRate,omitempty"`
+	PingLatencyMs  float64 `json:"pingLatencyMs,omitempty"`
+	CaptivePortal  bool    `json:"captivePortalEnabled,omitempty"`
 }
 
 // Device is one tracked dish or router.
 type Device struct {
-	ID          string      `json:"id"`
-	Kind        DeviceKind  `json:"kind"`
-	Name        string      `json:"name"`
-	Serial      string      `json:"serial,omitempty"`
-	DishSerial  string      `json:"dishSerial,omitempty"`
-	ServiceLine string      `json:"serviceLine,omitempty"`
-	Active      bool        `json:"active"`
+	ID          string     `json:"id"`
+	Kind        DeviceKind `json:"kind"`
+	Name        string     `json:"name"`
+	Serial      string     `json:"serial,omitempty"`
+	DishSerial  string     `json:"dishSerial,omitempty"`
+	ServiceLine string     `json:"serviceLine,omitempty"`
+	Active      bool       `json:"active"`
 
 	Status    *DeviceStatus  `json:"status,omitempty"`
 	Cursor    int64          `json:"cursor,omitempty"` // newest history second seen
@@ -74,13 +75,13 @@ type Device struct {
 // status. History is aggregated across polls using the dish history cursor
 // and persisted to a JSON file in the data dir so charts survive restarts.
 type Store struct {
-	mu       sync.Mutex
-	devices  map[string]*Device
-	window   time.Duration
-	dataDir  string
-	logFile  string
-	dirty    bool
-	now      func() time.Time
+	mu      sync.Mutex
+	devices map[string]*Device
+	window  time.Duration
+	dataDir string
+	logFile string
+	dirty   bool
+	now     func() time.Time
 }
 
 // NewStore creates a store with the given history window and data dir.
@@ -247,7 +248,7 @@ func (s *Store) AppendHistory(id string, hist *device.DishGetHistoryResponse) in
 			continue
 		}
 		sample := Sample{
-			Ts: ts,
+			Ts:                    ts,
 			PopPingLatencyMs:      f32At(lat, i),
 			PopPingDropRate:       f32At(drop, i),
 			DownlinkThroughputBps: f32At(down, i),

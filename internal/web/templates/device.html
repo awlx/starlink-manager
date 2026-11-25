@@ -49,6 +49,12 @@
 
 <div class="card">
   <h2>Current status</h2>
+  <p class="obstruction-line" data-field="obstructionLine">
+    <span class="pill {{.Device.ObstructionClass}}" data-field="obstruction">{{.Device.ObstructionText}}</span>
+    <span class="obstruction-bar" role="img" aria-label="Obstruction fraction of sky view">
+      <span class="obstruction-fill {{.Device.ObstructionClass}}" style="width: {{.Device.ObstructionBarPct}}%"></span>
+    </span>
+  </p>
   <dl class="kv wide" id="device-status">
     {{range .StatusRows}}
     <dt>{{.Label}}</dt><dd data-field="{{.Field}}">{{.Value}}</dd>

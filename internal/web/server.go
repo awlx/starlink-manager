@@ -26,13 +26,13 @@ var embedded embed.FS
 
 // Server wires the Starlink clients, the auth middleware and the templates.
 type Server struct {
-	cfg      *config.Config
-	auth     auth.Authenticator
-	gateway  *starlink.Gateway
-	roster   *starlink.Roster
-	store    *starlink.Store
-	session  *starlink.Session
-	pages    map[string]*template.Template
+	cfg     *config.Config
+	auth    auth.Authenticator
+	gateway *starlink.Gateway
+	roster  *starlink.Roster
+	store   *starlink.Store
+	session *starlink.Session
+	pages   map[string]*template.Template
 }
 
 // New builds the web server and parses all templates eagerly so template
@@ -97,29 +97,31 @@ func (s *Server) Handler() http.Handler {
 // ---------- template data ----------
 
 type pageInfo struct {
-	Title        string
-	User         *auth.User
-	LogoutURL    string
-	SessionDead  bool
+	Title         string
+	User          *auth.User
+	LogoutURL     string
+	SessionDead   bool
 	AccountNumber string
 }
 
 type DeviceView struct {
-	ID            string
-	Kind          string
-	KindLabel     string
-	DisplayName   string
-	Nickname      string
-	SerialNumber  string
-	ServiceLineName string
-	OnlineClass   string
-	OnlineLabel   string
-	LastSeenText  string
-	StateLabel    string
-	SNRText       string
-	ObstructionText string
-	VersionsText  string
-	Alerts        []string
+	ID                string
+	Kind              string
+	KindLabel         string
+	DisplayName       string
+	Nickname          string
+	SerialNumber      string
+	ServiceLineName   string
+	OnlineClass       string
+	OnlineLabel       string
+	LastSeenText      string
+	StateLabel        string
+	SNRText           string
+	ObstructionText   string
+	ObstructionClass  string
+	ObstructionBarPct int
+	VersionsText      string
+	Alerts            []string
 }
 
 type statusRow struct {
@@ -150,7 +152,7 @@ type devicePageData struct {
 
 type dashboardData struct {
 	pageInfo
-	Devices        []DeviceView
+	Devices         []DeviceView
 	LastRosterError string
 }
 
@@ -216,10 +218,10 @@ func isOnline(d *starlink.Device, now time.Time) bool {
 
 func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 	v := DeviceView{
-		ID:          d.ID,
-		Kind:        string(d.Kind),
-		DisplayName: d.Name,
-		Nickname:    nicknameOf(d),
+		ID:           d.ID,
+		Kind:         string(d.Kind),
+		DisplayName:  d.Name,
+		Nickname:     nicknameOf(d),
 		SerialNumber: d.Serial,
 	}
 	v.KindLabel = "Dish"
@@ -255,6 +257,8 @@ func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 		} else {
 			v.ObstructionText = "clear"
 		}
+		v.ObstructionClass = obstructionClass(st)
+		v.ObstructionBarPct = obstructionBarPct(st.ObstructionFraction)
 		v.VersionsText = strings.TrimSpace(st.SoftwareVersion + " / " + st.HardwareVersion)
 		for name, active := range st.Alerts {
 			if active {
@@ -395,6 +399,8 @@ func (s *Server) handleDevicePage(w http.ResponseWriter, r *http.Request) {
 			{Key: "drop", Title: "Ping drop rate (%)"},
 			{Key: "downlink", Title: "Downlink throughput"},
 			{Key: "uplink", Title: "Uplink throughput"},
+			{Key: "obstruction", Title: "Obstruction"},
+			{Key: "scheduled", Title: "Scheduled (boresight) windows"},
 		},
 		StatusRows: s.statusRows(d),
 	}
@@ -431,8 +437,9 @@ func (s *Server) statusRows(d *starlink.Device) []statusRow {
 		add("Ping drop rate", "drop", orDash(pctText(st.PopPingDropRate)))
 		add("Downlink", "down", orDash(bpsText(st.DownlinkThroughput)))
 		add("Uplink", "up", orDash(bpsText(st.UplinkThroughput)))
-		add("Obstruction", "obstruction", orDash(obstructionText(st)))
 		add("Currently obstructed", "obstructedNow", yesNo(st.CurrentlyObstructed))
+		add("Obstruction validity", "obstructionValid", orDash(secondsText(st.ObstructionValidS)))
+		add("Obstructed (last 24h)", "obstruction24h", orDash(secondsText(st.ObstructionLast24hS)))
 		add("Scheduled (last sample)", "scheduledFlag", yesNo(lastScheduled(d)))
 		add("Stow requested", "stow", yesNo(st.StowRequested))
 		add("Uptime", "uptime", orDash(durationText(st.UptimeS)))
@@ -456,9 +463,9 @@ func orDash(s string) string {
 	}
 	return s
 }
-func msText(v float64) string    { return fmt.Sprintf("%.0f ms", v) }
-func pctText(v float64) string   { return fmt.Sprintf("%.1f %%", v*100) }
-func bpsText(v float64) string   { return fmt.Sprintf("%.0f bps", v) }
+func msText(v float64) string  { return fmt.Sprintf("%.0f ms", v) }
+func pctText(v float64) string { return fmt.Sprintf("%.1f %%", v*100) }
+func bpsText(v float64) string { return fmt.Sprintf("%.0f bps", v) }
 func yesNo(b bool) string {
 	if b {
 		return "yes"
@@ -488,6 +495,40 @@ func obstructionText(st *starlink.DeviceStatus) string {
 	}
 	return t
 }
+
+// obstructionClass picks the severity colour for the obstruction badge:
+// green below 2%, amber between 2% and 10%, red above 10% or while an
+// obstruction is active right now.
+func obstructionClass(st *starlink.DeviceStatus) string {
+	switch {
+	case st.CurrentlyObstructed:
+		return "pill-error"
+	case st.ObstructionFraction*100 < 2:
+		return "pill-ok"
+	case st.ObstructionFraction*100 <= 10:
+		return "pill-warn"
+	default:
+		return "pill-error"
+	}
+}
+
+// obstructionBarPct returns the fill percentage for the obstruction bar,
+// capped at 100.
+func obstructionBarPct(frac float64) int {
+	pct := int(frac * 100)
+	if pct > 100 {
+		pct = 100
+	}
+	return pct
+}
+
+// secondsText renders a fractional-seconds duration, or "" for zero.
+func secondsText(v float64) string {
+	if v <= 0 {
+		return ""
+	}
+	return durationText(uint64(v))
+}
 func lastSeenText(d *starlink.Device) string {
 	if d.LastSeen.IsZero() {
 		return "never"
@@ -514,15 +555,16 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 type summaryDevice struct {
-	ID          string   `json:"id"`
-	OnlineLabel string   `json:"onlineLabel,omitempty"`
-	OnlineClass string   `json:"onlineClass,omitempty"`
-	State       string   `json:"state,omitempty"`
-	SNR         string   `json:"snr,omitempty"`
-	Obstruction string   `json:"obstruction,omitempty"`
-	Versions    string   `json:"versions,omitempty"`
-	Alerts      []string `json:"alerts,omitempty"`
-	Updated     string   `json:"updated,omitempty"`
+	ID               string   `json:"id"`
+	OnlineLabel      string   `json:"onlineLabel,omitempty"`
+	OnlineClass      string   `json:"onlineClass,omitempty"`
+	State            string   `json:"state,omitempty"`
+	SNR              string   `json:"snr,omitempty"`
+	Obstruction      string   `json:"obstruction,omitempty"`
+	ObstructionClass string   `json:"obstructionClass,omitempty"`
+	Versions         string   `json:"versions,omitempty"`
+	Alerts           []string `json:"alerts,omitempty"`
+	Updated          string   `json:"updated,omitempty"`
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
@@ -531,22 +573,23 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	for _, d := range sortedDevices(s.store) {
 		v := s.deviceView(d, now)
 		devs = append(devs, summaryDevice{
-			ID:          v.ID,
-			OnlineLabel: v.OnlineLabel,
-			OnlineClass: v.OnlineClass,
-			State:       v.StateLabel,
-			SNR:         v.SNRText,
-			Obstruction: v.ObstructionText,
-			Versions:    v.VersionsText,
-			Alerts:      v.Alerts,
-			Updated:     v.LastSeenText,
+			ID:               v.ID,
+			OnlineLabel:      v.OnlineLabel,
+			OnlineClass:      v.OnlineClass,
+			State:            v.StateLabel,
+			SNR:              v.SNRText,
+			Obstruction:      v.ObstructionText,
+			ObstructionClass: v.ObstructionClass,
+			Versions:         v.VersionsText,
+			Alerts:           v.Alerts,
+			Updated:          v.LastSeenText,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"sessionDead": s.sessionDead(),
+		"sessionDead":   s.sessionDead(),
 		"accountNumber": s.accountNumber(),
-		"updatedAt":   now.Unix(),
-		"devices":     devs,
+		"updatedAt":     now.Unix(),
+		"devices":       devs,
 	})
 }
 
@@ -573,11 +616,13 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	var tMin int64
 	for i, smp := range samples {
 		out = append(out, apiSample{
-			Ts:      smp.Ts.Unix(),
-			PingMs:  smp.PopPingLatencyMs,
-			DropRate: smp.PopPingDropRate,
-			DownBps: smp.DownlinkThroughputBps,
-			UpBps:   smp.UplinkThroughputBps,
+			Ts:         smp.Ts.Unix(),
+			PingMs:     smp.PopPingLatencyMs,
+			DropRate:   smp.PopPingDropRate,
+			DownBps:    smp.DownlinkThroughputBps,
+			UpBps:      smp.UplinkThroughputBps,
+			Obstructed: smp.Obstructed,
+			Scheduled:  smp.Scheduled,
 		})
 		if i == 0 {
 			tMin = smp.Ts.Unix()
@@ -593,11 +638,13 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 // apiSample is the JSON shape of one history point. The timestamp is unix
 // seconds so the client-side chart can plot it directly.
 type apiSample struct {
-	Ts      int64   `json:"ts"`
-	PingMs  float64 `json:"pingMs"`
-	DropRate float64 `json:"dropRate"`
-	DownBps float64 `json:"downBps"`
-	UpBps   float64 `json:"upBps"`
+	Ts         int64   `json:"ts"`
+	PingMs     float64 `json:"pingMs"`
+	DropRate   float64 `json:"dropRate"`
+	DownBps    float64 `json:"downBps"`
+	UpBps      float64 `json:"upBps"`
+	Obstructed bool    `json:"obstructed"`
+	Scheduled  bool    `json:"scheduled"`
 }
 
 type apiClient struct {
@@ -649,10 +696,10 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 // ---------- admin actions ----------
 
 type actionRequest struct {
-	Action           string `json:"action"`
-	Enable           bool   `json:"enable"`
-	StartMinutes     uint32 `json:"startMinutes"`
-	DurationMinutes  uint32 `json:"durationMinutes"`
+	Action          string `json:"action"`
+	Enable          bool   `json:"enable"`
+	StartMinutes    uint32 `json:"startMinutes"`
+	DurationMinutes uint32 `json:"durationMinutes"`
 }
 
 var sameSiteOK = func(r *http.Request) bool {
