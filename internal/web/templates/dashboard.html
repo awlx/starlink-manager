@@ -44,7 +44,7 @@
     <div class="alerts" data-field="alerts">
       {{range .Alerts}}<span class="pill pill-warn">{{.}}</span>{{end}}
     </div>
-    <div class="card-foot"><span>Snapshot · {{.LastSeenText}}</span><span class="card-open">View device <span aria-hidden="true">↗</span></span></div>
+    <div class="card-foot"><span>Snapshot · <span data-field="updated">{{.LastSeenText}}</span></span><span class="card-open">View device <span aria-hidden="true">↗</span></span></div>
   </a>
   {{end}}
 </div>

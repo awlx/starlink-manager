@@ -130,7 +130,7 @@ func TestDashboardRendersDevices(t *testing.T) {
 		t.Fatalf("dashboard status = %d", resp.StatusCode)
 	}
 	page := readAll(t, resp)
-	for _, want := range []string{"STARLINK ab12cd", "CONNECTED", "rev3", "online", "42 ms", "120.0 Mbps", "21.0 Mbps", "1.0 %", `data-count="online">1`, `data-count="offline">0`} {
+	for _, want := range []string{"STARLINK ab12cd", "CONNECTED", "rev3", "online", "42 ms", "120.0 Mbps", "21.0 Mbps", "1.0 %", `data-count="online">1`, `data-count="offline">0`, `data-field="updated"`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("dashboard missing %q", want)
 		}
