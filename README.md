@@ -103,6 +103,7 @@ clear message for invalid or missing values.
 | `FORWARD_AUTH_GROUPS_HEADER` | `X-Forwarded-Groups` | |
 | `SESSION_COOKIE_SECRET` | — | Random secret (≥ 32 chars) signing the session cookie; required in `oidc`/`forwardauth` mode |
 | `SESSION_COOKIE_SECURE` | auto | Force `Secure` on session cookies (auto-on when the OIDC redirect URL is HTTPS) |
+| `METRICS_LISTEN_ADDR` | `:9101` | Listen address for the Prometheus `/metrics` endpoint (separate listener, not behind web auth). Set to `disabled` to turn it off |
 
 ## Credentials
 
@@ -205,6 +206,31 @@ The intended production contract, for the Komodo/Salt stack:
   Keycloak-based forward auth (`AUTH_MODE=forwardauth`).
 - Persistent history lives in a volume mounted at `/data` (created with
   nonroot ownership in the image, so named volumes are writable).
+
+### Metrics endpoint
+
+A Prometheus exposition is served on a **separate listener** at
+`/metrics` (`METRICS_LISTEN_ADDR`, default `:9101`). It is intentionally
+not behind the web app authentication: keep the port bound to a private
+interface only (loopback or the nebula interface) in the compose/Salt
+stack — never route it through Traefik to the public web. Exposed series:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `starlink_device_up` | gauge | 1 per device that answered a poll within the online TTL |
+| `starlink_device_pop_ping_drop_rate` | gauge | Ping drop fraction (0..1) |
+| `starlink_device_pop_ping_latency_ms` | gauge | Latest ping latency |
+| `starlink_device_downlink_bps` / `starlink_device_uplink_bps` | gauge | Latest throughput |
+| `starlink_device_obstruction_fraction` | gauge | Obstructed sky fraction (0..1) |
+| `starlink_devices_total` / `starlink_devices_online` | gauge | Fleet counts |
+| `starlink_session_dead` | gauge | 1 while the Starlink session is latched dead (re-auth needed) |
+| `starlink_store_size_bytes` | gauge | Size of the persisted store file |
+| `starlink_poll_errors_total` | counter | Poll rounds that ended with an error |
+| `starlink_poll_round_duration_seconds` | histogram | Duration of one complete poll round |
+
+Per-device series carry `device="<id>"` and `name="<friendly name>"`
+labels. The exposition is hand-rolled in text format (no client library)
+to keep dependencies small.
 
 ## Security notes
 
