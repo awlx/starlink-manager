@@ -159,3 +159,39 @@ func TestCookieJarMaxAge(t *testing.T) {
 		t.Fatalf("expired-Expires empty-value delete ignored: %v", got)
 	}
 }
+
+func TestTelemetryAlertCodeTranslation(t *testing.T) {
+	body := `{"data":{"values":[["u",1700000000000000000,"ut12345678-a12b3456-123456c1",120.5,18.5,0.01,42,0.5,86400,0.8,0,-1,"2024.05.01","DE",false,[51]],
+		["u",1700000001000000000,"ut12345678-a12b3456-123456c1",120.5,18.5,0.01,42,0.5,86400,0.8,0,-1,"2024.05.01","DE",false,[50,53]]],
+		"columnNamesByDeviceType":{"u":["DeviceType","UtcTimestampNs","DeviceId","DownlinkThroughput","UplinkThroughput","PingDropRateAvg","PingLatencyMsAvg","ObstructionPercentTime","Uptime","SignalQuality","H3CellId","SecondsUntilSwupdateRebootPossible","RunningSoftwareVersion","CountryCode","InTerritorialWaters","ActiveAlerts"]}},
+		"metadata":{"enums":{"DeviceType":{"u":"UserTerminal"},"AlertsByDeviceType":{"u":{"50":"ethernet_slow_10mbps","51":"ethernet_slow_100mbps","53":"actuator_motor_stuck"}}}}}`
+	tms, err := parseTelemetryResponse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tms) != 2 {
+		t.Fatalf("entries = %d, want 2", len(tms))
+	}
+	if len(tms[0].ActiveAlerts) != 1 || tms[0].ActiveAlerts[0] != "ethernet_slow_100mbps" {
+		t.Fatalf("alerts = %v, want [ethernet_slow_100mbps]", tms[0].ActiveAlerts)
+	}
+	want := []string{"ethernet_slow_10mbps", "actuator_motor_stuck"}
+	for i, w := range want {
+		if tms[1].ActiveAlerts[i] != w {
+			t.Fatalf("alerts[%d] = %q, want %q", i, tms[1].ActiveAlerts[i], w)
+		}
+	}
+}
+
+func TestTelemetryUnknownAlertCodeKept(t *testing.T) {
+	body := `{"data":{"values":[["u",1700000000000000000,"ut12345678-a12b3456-123456c1",120.5,18.5,0.01,42,0.5,86400,0.8,0,-1,"2024.05.01","DE",false,[999]]],
+		"columnNamesByDeviceType":{"u":["DeviceType","UtcTimestampNs","DeviceId","DownlinkThroughput","UplinkThroughput","PingDropRateAvg","PingLatencyMsAvg","ObstructionPercentTime","Uptime","SignalQuality","H3CellId","SecondsUntilSwupdateRebootPossible","RunningSoftwareVersion","CountryCode","InTerritorialWaters","ActiveAlerts"]}},
+		"metadata":{"enums":{"AlertsByDeviceType":{"u":{"50":"ethernet_slow_10mbps"}}}}}`
+	tms, err := parseTelemetryResponse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tms) != 1 || tms[0].ActiveAlerts[0] != "999" {
+		t.Fatalf("unknown code mangled: %v", tms[0].ActiveAlerts)
+	}
+}

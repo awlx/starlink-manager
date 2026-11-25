@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 )
 
@@ -81,9 +82,16 @@ func parseTelemetryResponse(data []byte) ([]*DeviceTelemetry, error) {
 			Values                  []json.RawMessage   `json:"values"`
 			ColumnNamesByDeviceType map[string][]string `json:"columnNamesByDeviceType"`
 		} `json:"data"`
+		Metadata struct {
+			Enums struct {
+				AlertsByDeviceType map[string]map[string]any `json:"AlertsByDeviceType"`
+			} `json:"enums"`
+		} `json:"metadata"`
 	}
 	var entries []map[string]any
+	var alertEnums map[string]map[string]any
 	if err := json.Unmarshal(data, &wrapper); err == nil && len(wrapper.Data.Values) > 0 && wrapper.Data.ColumnNamesByDeviceType != nil {
+		alertEnums = wrapper.Metadata.Enums.AlertsByDeviceType
 		for _, rv := range wrapper.Data.Values {
 			var row []any
 			if err := json.Unmarshal(rv, &row); err != nil {
@@ -129,10 +137,34 @@ func parseTelemetryResponse(data []byte) ([]*DeviceTelemetry, error) {
 	var out []*DeviceTelemetry
 	for _, e := range entries {
 		if tm := parseTelemetryEntry(e); tm != nil {
+			translateAlertCodes(alertEnums, tm)
 			out = append(out, tm)
 		}
 	}
 	return out, nil
+}
+
+// translateAlertCodes maps numeric alert codes to the names the account API
+// publishes in metadata.enums.AlertsByDeviceType (e.g. 50 →
+// ethernet_slow_10mbps, 51 → ethernet_slow_100mbps). Unknown codes are kept
+// as-is so new firmware alerts still surface.
+func translateAlertCodes(enum map[string]map[string]any, tm *DeviceTelemetry) {
+	if len(enum) == 0 || len(tm.ActiveAlerts) == 0 {
+		return
+	}
+	for i, a := range tm.ActiveAlerts {
+		if _, err := strconv.Atoi(a); err != nil {
+			continue // already a name
+		}
+		for _, codes := range enum {
+			if v, ok := codes[a]; ok {
+				if name, ok := v.(string); ok && name != "" {
+					tm.ActiveAlerts[i] = name
+				}
+				break
+			}
+		}
+	}
 }
 
 func mapValues(m map[string]any) []any {

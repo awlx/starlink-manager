@@ -315,7 +315,7 @@ func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 		v.VersionsText = versionsText(
 			firstNonEmpty(st.SoftwareVersion, telemetryString(d.Telemetry, "softwareVersion")),
 			st.HardwareVersion)
-		v.Alerts = activeAlerts(st.Alerts)
+		v.Alerts = deviceAlerts(d)
 		if d.Kind == starlink.KindRouter {
 			if st.Wifi != nil {
 				v.PingText = msText(st.Wifi.PingLatencyMs)
@@ -380,7 +380,13 @@ func alertLabel(key string) string {
 	case "mast_not_near_vertical":
 		return "mast not near vertical"
 	case "slow_ethernet_speeds":
-		return "slow ethernet speeds"
+		return "Ethernet link speeds low (may limit throughput)"
+	case "slow_ethernet_speeds_100", "ethernet_slow_100mbps":
+		return "Ethernet limited to 100 Mbps"
+	case "slow_ethernet_speeds_10", "ethernet_slow_10mbps":
+		return "Ethernet limited to 10 Mbps"
+	case "no_ethernet_link":
+		return "no Ethernet link"
 	case "obstructed":
 		return "obstructed"
 	default:
@@ -549,7 +555,7 @@ func (s *Server) statusRows(d *starlink.Device) []statusRow {
 		add("Scheduled (last sample)", "scheduledFlag", yesNo(s.lastScheduled(d)))
 		add("Stow requested", "stow", yesNo(st.StowRequested))
 		add("Uptime", "uptime", orDash(uptimeText(st, d.Telemetry)))
-		if alerts := activeAlerts(st.Alerts); len(alerts) > 0 {
+		if alerts := deviceAlerts(d); len(alerts) > 0 {
 			add("Alerts", "alerts", strings.Join(alerts, ", "))
 		}
 	}
@@ -655,6 +661,41 @@ func snrText(v *float64) string {
 }
 
 // activeAlerts returns the labels of the active alerts in a stable order.
+// Gateway alert flags and cloud-telemetry alert names are merged so
+// alerts that only appear in the telemetry cache still surface.
+func deviceAlerts(d *starlink.Device) []string {
+	merged := map[string]bool{}
+	if st := d.Status; st != nil {
+		for name, active := range st.Alerts {
+			merged[name] = active
+		}
+	}
+	if tm := d.Telemetry; tm != nil {
+		switch raw := tm["activeAlerts"].(type) {
+		case []any:
+			for _, v := range raw {
+				if s, ok := v.(string); ok && s != "" {
+					merged[s] = true
+				}
+			}
+		case []string:
+			for _, s := range raw {
+				if s != "" {
+					merged[s] = true
+				}
+			}
+		}
+	}
+	var out []string
+	for name, active := range merged {
+		if active {
+			out = append(out, alertLabel(name))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func activeAlerts(m map[string]bool) []string {
 	var out []string
 	for name, active := range m {

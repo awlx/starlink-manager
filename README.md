@@ -217,6 +217,24 @@ The intended production contract, for the Komodo/Salt stack:
   committed to the repository.
 - The app talks to Starlink over HTTPS only.
 
+### Ethernet diagnostics
+
+The device protocol defines a `get_diagnostics` request (field 6000), but
+the cloud account gateway rejects it for account-managed devices
+(`grpc-status 3 COMMAND_NOT_ALLOWED`), and no field in any device status
+response carries the negotiated Ethernet link speed. What the app can
+surface is **alert-level information only**:
+
+- `slow_ethernet_speeds` (dish status alert) — the negotiated Ethernet
+  speeds to the dish are low and may limit throughput.
+- Telemetry alert codes `50` (`ethernet_slow_10mbps`) and `51`
+  (`ethernet_slow_100mbps`) from the cloud telemetry cache — rendered as
+  "Ethernet limited to 10/100 Mbps" warning badges.
+
+These render as warning pills on the dashboard cards and the device
+detail page. If Starlink exposes the negotiated link state in a future
+firmware response, the app will pick it up via the same status snapshot.
+
 ## Development
 
 ```sh

@@ -745,3 +745,41 @@ func TestDeviceViewVersionsText(t *testing.T) {
 		})
 	}
 }
+
+func TestEthernetAlertLabels(t *testing.T) {
+	cases := map[string]string{
+		"slow_ethernet_speeds":     "Ethernet link speeds low (may limit throughput)",
+		"slow_ethernet_speeds_100": "Ethernet limited to 100 Mbps",
+		"ethernet_slow_100mbps":    "Ethernet limited to 100 Mbps",
+		"ethernet_slow_10mbps":     "Ethernet limited to 10 Mbps",
+		"no_ethernet_link":         "no Ethernet link",
+	}
+	for key, want := range cases {
+		if got := alertLabel(key); got != want {
+			t.Errorf("alertLabel(%q) = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestEthernetAlertRendersAsWarningPill(t *testing.T) {
+	srv, ts := newTestServer(t)
+	seedDevice(t, srv.store)
+	if dev, ok := srv.store.Device("ut1234"); ok {
+		dev.Status.Alerts = map[string]bool{"slow_ethernet_speeds": true}
+		srv.store.SetStatus(dev.ID, dev.Status)
+		srv.store.SetTelemetry(dev.ID, map[string]any{
+			"activeAlerts": []string{"ethernet_slow_100mbps"},
+		})
+	}
+	resp, err := http.Get(ts.URL + "/device/ut1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readAll(t, resp)
+	for _, want := range []string{"Ethernet link speeds low (may limit throughput)", "Ethernet limited to 100 Mbps", "pill-warn"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("device page missing %q", want)
+		}
+	}
+}
