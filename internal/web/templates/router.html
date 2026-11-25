@@ -28,12 +28,12 @@
 
 <div class="card">
   <div class="eyebrow">Device diagnostics</div><h2>Current status</h2>
-  <dl class="kv wide" id="device-status">
+  <dl class="kv wide" id="device-status" data-device-id="{{.Device.ID}}">
     {{range .StatusRows}}
     <dt>{{.Label}}</dt><dd data-field="{{.Field}}">{{.Value}}</dd>
     {{end}}
   </dl>
-  <p class="muted snapshot-note">Snapshot · {{.Device.LastSeenText}}. Reload for the latest diagnostics.</p>
+  <p class="muted snapshot-note">Snapshot · <span data-field="updated">{{.Device.LastSeenText}}</span> · refreshed every 30s. Reload for a full page update.</p>
 </div>
 {{if .AdminUser}}
 <section class="card action-card" aria-labelledby="actions-heading">

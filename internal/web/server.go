@@ -105,6 +105,7 @@ func (s *Server) Handler() http.Handler {
 	protected.HandleFunc("GET /{$}", s.handleDashboard)
 	protected.HandleFunc("GET /device/{id}", s.handleDevicePage)
 	protected.HandleFunc("GET /api/summary", s.handleSummary)
+	protected.HandleFunc("GET /api/device/{id}/status", s.handleDeviceStatus)
 	protected.HandleFunc("GET /api/device/{id}/history", s.handleHistory)
 	protected.HandleFunc("GET /api/device/{id}/clients", s.handleClients)
 	protected.Handle("POST /api/device/{id}/action", auth.RequireAdmin(http.HandlerFunc(s.handleAction)))
@@ -813,6 +814,31 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		"accountNumber": s.accountNumber(),
 		"updatedAt":     now.Unix(),
 		"devices":       devs,
+	})
+}
+
+// handleDeviceStatus returns one device's full status rows as JSON so the
+// 30s summary poll can also refresh device- and router-page pills without
+// a manual reload.
+func (s *Server) handleDeviceStatus(w http.ResponseWriter, r *http.Request) {
+	d, ok := s.deviceForAPI(w, r)
+	if !ok {
+		return
+	}
+	v := s.deviceView(d, time.Now())
+	rows := s.statusRows(d)
+	m := map[string]string{}
+	for _, row := range rows {
+		m[row.Field] = row.Value
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":            v.ID,
+		"onlineLabel":   v.OnlineLabel,
+		"onlineClass":   v.OnlineClass,
+		"obstruction":   v.ObstructionText,
+		"obstructionClass": v.ObstructionClass,
+		"obstructionBarPct": v.ObstructionBarPct,
+		"rows":          m,
 	})
 }
 

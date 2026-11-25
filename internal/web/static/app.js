@@ -450,5 +450,33 @@
     }
     loadSummary();
     setInterval(loadSummary, 30000);
+    var pageDevice = document.getElementById("device-status");
+    if (pageDevice) {
+      var pillDeviceId = pageDevice.getAttribute("data-device-id");
+      function refreshDeviceStatus() {
+        fetchJSON("/api/device/" + pillDeviceId + "/status").then(function (r) {
+          if (!r.ok) return;
+          var rows = r.body.rows || {};
+          Object.keys(rows).forEach(function (f) {
+            var el = pageDevice.querySelector('[data-field="' + f + '"]');
+            if (el) el.textContent = rows[f];
+          });
+          var pill = document.querySelector('[data-field="online"]');
+          if (pill && r.body.onlineLabel) {
+            pill.textContent = r.body.onlineLabel;
+            pill.className = "pill " + (r.body.onlineClass || "pill-muted");
+          }
+          var obstruction = document.querySelector('[data-field="obstruction"]');
+          var line = document.querySelector('[data-field="obstructionLine"]');
+          if (obstruction && r.body.obstruction) {
+            obstruction.textContent = r.body.obstruction;
+            obstruction.className = "pill " + (r.body.obstructionClass || "pill-muted");
+            if (line) line.hidden = false;
+          }
+        });
+      }
+      refreshDeviceStatus();
+      setInterval(refreshDeviceStatus, 30000);
+    }
   });
 })();

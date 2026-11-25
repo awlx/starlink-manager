@@ -398,6 +398,44 @@ func TestSummaryJSON(t *testing.T) {
 	}
 }
 
+func TestDeviceStatusJSON(t *testing.T) {
+	srv, ts := newTestServer(t)
+	seedDevice(t, srv.store)
+	resp, err := http.Get(ts.URL + "/api/device/ut1234/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("device status = %d", resp.StatusCode)
+	}
+	var body struct {
+		ID          string            `json:"id"`
+		OnlineLabel string            `json:"onlineLabel"`
+		Rows        map[string]string `json:"rows"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.ID != "ut1234" || body.OnlineLabel != "online" {
+		t.Errorf("identity fields = %q/%q", body.ID, body.OnlineLabel)
+	}
+	for field, want := range map[string]string{"state": "CONNECTED", "snr": "8.5", "updated": "0s ago"} {
+		if body.Rows[field] != want {
+			t.Errorf("row %q = %q, want %q", field, body.Rows[field], want)
+		}
+	}
+	// Unknown device answers a JSON 404.
+	resp2, err := http.Get(ts.URL + "/api/device/ut9999/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown device status = %d, want 404", resp2.StatusCode)
+	}
+}
+
 func TestClientsRejectsDish(t *testing.T) {
 	srv, ts := newTestServer(t)
 	seedDevice(t, srv.store)
