@@ -292,20 +292,23 @@
             el.textContent = dev[f];
           }
         });
-        // Count the current roster; card inventory is a server-rendered snapshot.
-        var grid = document.getElementById("device-grid");
-        if (grid) {
-          var cards = grid.querySelectorAll(".device-card");
-          var ids = (r.body.devices || []).map(function (dev) { return dev.id; });
-          var sameRoster = cards.length === ids.length && Array.from(cards).every(function (card) { return ids.indexOf(card.dataset.deviceId) >= 0; });
-          if (sameRoster) {
-            Object.keys(counts).forEach(function (key) {
-              var el = document.querySelector('[data-count="' + key + '"]');
-              if (el) el.textContent = counts[key];
-            });
-          } else if (info) info.textContent = "Device roster changed · reload to update the inventory";
-        }
       });
+      // Count the current roster once all devices are tallied; the card
+      // inventory is a server-rendered snapshot.
+      var grid = document.getElementById("device-grid");
+      var ids = (r.body.devices || []).map(function (dev) { return dev.id; });
+      if (grid) {
+        var cards = grid.querySelectorAll(".device-card");
+        var sameRoster = cards.length === ids.length && Array.from(cards).every(function (card) { return ids.indexOf(card.dataset.deviceId) >= 0; });
+        if (sameRoster) {
+          Object.keys(counts).forEach(function (key) {
+            var el = document.querySelector('[data-count="' + key + '"]');
+            if (el) el.textContent = counts[key];
+          });
+        } else if (info) info.textContent = "Device roster changed · reload to update the inventory";
+      } else if (ids.length && document.querySelector(".empty-card") && info) {
+        info.textContent = "Devices found · reload to show them";
+      }
     });
   }
 
