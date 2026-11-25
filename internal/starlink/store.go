@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"time"
 
@@ -23,27 +24,31 @@ type Sample struct {
 	SNR                   float64   `json:"snr"`
 	Scheduled             bool      `json:"scheduled"`
 	Obstructed            bool      `json:"obstructed"`
+	SNRReported           bool      `json:"snrReported,omitempty"`
+	ScheduledReported     bool      `json:"scheduledReported,omitempty"`
+	ObstructedReported    bool      `json:"obstructedReported,omitempty"`
 }
 
 // DeviceStatus is the latest snapshot fetched through the device gateway.
 type DeviceStatus struct {
-	FetchedAt           time.Time        `json:"fetchedAt"`
-	HardwareVersion     string           `json:"hardwareVersion,omitempty"`
-	SoftwareVersion     string           `json:"softwareVersion,omitempty"`
-	State               string           `json:"state,omitempty"`
-	UptimeS             uint64           `json:"uptimeS,omitempty"`
-	SNR                 *float64         `json:"snr,omitempty"` // nil: firmware did not report it
-	PopPingLatencyMs    float64          `json:"popPingLatencyMs,omitempty"`
-	PopPingDropRate     float64          `json:"popPingDropRate,omitempty"`
-	DownlinkThroughput  float64          `json:"downlinkBps,omitempty"`
-	UplinkThroughput    float64          `json:"uplinkBps,omitempty"`
-	ObstructionFraction float64          `json:"obstructionFraction,omitempty"`
-	ObstructionValidS   float64          `json:"obstructionValidS,omitempty"`
-	ObstructionLast24hS float64          `json:"obstructionLast24hS,omitempty"`
-	CurrentlyObstructed bool             `json:"currentlyObstructed,omitempty"`
-	StowRequested       bool             `json:"stowRequested,omitempty"`
-	Alerts              map[string]bool  `json:"alerts,omitempty"`
-	Wifi                *WifiStatusExtra `json:"wifi,omitempty"`
+	FetchedAt           time.Time         `json:"fetchedAt"`
+	HardwareVersion     string            `json:"hardwareVersion,omitempty"`
+	SoftwareVersion     string            `json:"softwareVersion,omitempty"`
+	State               string            `json:"state,omitempty"`
+	UptimeS             uint64            `json:"uptimeS,omitempty"`
+	SNR                 *float64          `json:"snr,omitempty"` // nil: firmware did not report it
+	PopPingLatencyMs    float64           `json:"popPingLatencyMs,omitempty"`
+	PopPingDropRate     float64           `json:"popPingDropRate,omitempty"`
+	DownlinkThroughput  float64           `json:"downlinkBps,omitempty"`
+	UplinkThroughput    float64           `json:"uplinkBps,omitempty"`
+	ObstructionFraction float64           `json:"obstructionFraction,omitempty"`
+	ObstructionValidS   float64           `json:"obstructionValidS,omitempty"`
+	ObstructionLast24hS float64           `json:"obstructionLast24hS,omitempty"`
+	CurrentlyObstructed bool              `json:"currentlyObstructed,omitempty"`
+	StowRequested       bool              `json:"stowRequested,omitempty"`
+	Alerts              map[string]bool   `json:"alerts,omitempty"`
+	Wifi                *WifiStatusExtra  `json:"wifi,omitempty"`
+	Reported            map[string]string `json:"reported"`
 }
 
 // WifiStatusExtra carries router-specific status fields.
@@ -58,13 +63,15 @@ type WifiStatusExtra struct {
 
 // Device is one tracked dish or router.
 type Device struct {
-	ID          string     `json:"id"`
-	Kind        DeviceKind `json:"kind"`
-	Name        string     `json:"name"`
-	Serial      string     `json:"serial,omitempty"`
-	DishSerial  string     `json:"dishSerial,omitempty"`
-	ServiceLine string     `json:"serviceLine,omitempty"`
-	Active      bool       `json:"active"`
+	ID            string            `json:"id"`
+	Kind          DeviceKind        `json:"kind"`
+	Name          string            `json:"name"`
+	Serial        string            `json:"serial,omitempty"`
+	DishSerial    string            `json:"dishSerial,omitempty"`
+	ServiceLine   string            `json:"serviceLine,omitempty"`
+	Active        bool              `json:"active"`
+	RosterDetails map[string]string `json:"rosterDetails,omitempty"`
+	ClientDetails map[string]string `json:"clientDetails,omitempty"`
 	// Retired marks a device that left the account roster. It is pruned
 	// after the grace period so kit swaps keep their history available.
 	Retired   *time.Time `json:"retired,omitempty"`
@@ -242,13 +249,14 @@ func (s *Store) UpsertDevice(info *Device) {
 	}
 	if existing.Name != info.Name || existing.Serial != info.Serial ||
 		existing.DishSerial != info.DishSerial || existing.ServiceLine != info.ServiceLine ||
-		existing.Active != info.Active || existing.Kind != info.Kind {
+		existing.Active != info.Active || existing.Kind != info.Kind || !reflect.DeepEqual(existing.RosterDetails, info.RosterDetails) {
 		existing.Name = info.Name
 		existing.Serial = info.Serial
 		existing.DishSerial = info.DishSerial
 		existing.ServiceLine = info.ServiceLine
 		existing.Active = info.Active
 		existing.Kind = info.Kind
+		existing.RosterDetails = info.RosterDetails
 		s.dirty = true
 	}
 }
@@ -337,7 +345,7 @@ func (s *Store) AppendHistory(id string, hist *device.DishGetHistoryResponse) in
 	// observed time so the series self-heals instead of dropping every later
 	// sample forever.
 	anchor := fetched
-	if len(d.Samples) > 0 && !fetched.After(lastTs.Add(2 * sampleInterval())) {
+	if len(d.Samples) > 0 && !fetched.After(lastTs.Add(2*sampleInterval())) {
 		anchor = s.now().Truncate(time.Second)
 	}
 	var added int
@@ -359,6 +367,9 @@ func (s *Store) AppendHistory(id string, hist *device.DishGetHistoryResponse) in
 			DownlinkThroughputBps: f32At(down, i),
 			UplinkThroughputBps:   f32At(up, i),
 			SNR:                   f32At(snr, i),
+			SNRReported:           i < len(snr),
+			ScheduledReported:     i < len(sched),
+			ObstructedReported:    i < len(obs),
 			Scheduled:             bAt(sched, i),
 			Obstructed:            bAt(obs, i),
 		})
@@ -457,10 +468,27 @@ func (s *Store) SetTelemetry(id string, tm map[string]any) {
 	if !ok {
 		return
 	}
+
 	// Sanitize floats: NaN/Inf break json.Marshal, which would make every
 	// save fail until restart.
 	d.Telemetry = sanitizeTelemetry(tm)
 	s.dirty = true
+}
+
+// SetClients keeps the full read-only client snapshot for the HTML diagnostics.
+func (s *Store) SetClients(id string, clients []*device.WifiClient) {
+	fields := map[string]string{"Clients fetched (UTC)": s.now().UTC().Format(time.RFC3339)}
+	for i, client := range clients {
+		for key, value := range reportedFields(client) {
+			fields[fmt.Sprintf("clients[%d].%s", i, key)] = value
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d, ok := s.devices[id]; ok {
+		d.ClientDetails = fields
+		s.dirty = true
+	}
 }
 
 // sanitizeTelemetry replaces NaN/±Inf float values with 0 and drops nils.

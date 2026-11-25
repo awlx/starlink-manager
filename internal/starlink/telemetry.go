@@ -25,6 +25,7 @@ type DeviceTelemetry struct {
 	UptimeSeconds          float64
 	CountryCode            string
 	ActiveAlerts           []string
+	Present                map[string]bool
 }
 
 // Telemetry queries the device-data telemetry cache. accountNumber comes
@@ -202,6 +203,22 @@ func parseTelemetryEntry(m map[string]any) *DeviceTelemetry {
 		SignalQuality:          mapFloat(m, "SignalQuality", "signalQuality"),
 		UptimeSeconds:          mapFloat(m, "UptimeSeconds", "Uptime", "uptimeSeconds", "Uptime"),
 		CountryCode:            mapString(m, "CountryCode", "countryCode"),
+		Present:                map[string]bool{},
+	}
+	for key, aliases := range map[string][]string{
+		"timestamp":              {"UtcTimestampNs", "utcTimestampNs"},
+		"softwareVersion":        {"RunningSoftwareVersion", "SoftwareVersion", "softwareVersion"},
+		"downlinkThroughputMbps": {"DownlinkThroughputMbps", "DownlinkThroughput", "downlinkThroughputMbps"},
+		"uplinkThroughputMbps":   {"UplinkThroughputMbps", "UplinkThroughput", "uplinkThroughputMbps"},
+		"pingDropRateAvg":        {"PingDropRateAvg", "PingDropRate", "pingDropRateAvg"},
+		"pingLatencyMsAvg":       {"PingLatencyMsAvg", "PingLatencyMs", "pingLatencyMsAvg"},
+		"obstructionPercentTime": {"ObstructionPercentTime", "obstructionPercentTime"},
+		"signalQuality":          {"SignalQuality", "signalQuality"},
+		"uptimeSeconds":          {"UptimeSeconds", "Uptime", "uptimeSeconds"},
+		"countryCode":            {"CountryCode", "countryCode"},
+	} {
+		v, ok := lookup(m, aliases...)
+		tm.Present[key] = ok && v != nil
 	}
 	if alerts, ok := lookup(m, "ActiveAlert", "ActiveAlerts", "activeAlerts"); ok {
 		switch v := alerts.(type) {

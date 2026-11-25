@@ -93,7 +93,7 @@ func New(cfg *config.Config, authN auth.Authenticator, gateway *starlink.Gateway
 	if err != nil {
 		return nil, fmt.Errorf("parse base template: %w", err)
 	}
-	for _, page := range []string{"dashboard", "device", "router", "error"} {
+	for _, page := range []string{"dashboard", "device", "router", "clients", "error"} {
 		t, err := base.Clone()
 		if err != nil {
 			return nil, err
@@ -142,6 +142,18 @@ func (s *Server) Handler() http.Handler {
 	protected := http.NewServeMux()
 	protected.HandleFunc("GET /{$}", s.handleDashboard)
 	protected.HandleFunc("GET /device/{id}", s.handleDevicePage)
+	protected.HandleFunc("GET /clients", s.handleClientsPage)
+	protected.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+			http.NotFound(w, r)
+			return
+		}
+		msg := "This page does not exist. Return to the fleet overview to find your devices."
+		if r.URL.Path == "/metrics" {
+			msg = "Prometheus metrics are served on the separate private metrics listener (default port 9101), not this web app."
+		}
+		s.renderError(w, r, http.StatusNotFound, "Page not found", msg)
+	})
 	protected.HandleFunc("GET /api/summary", s.handleSummary)
 	protected.HandleFunc("GET /api/device/{id}/status", s.handleDeviceStatus)
 	protected.HandleFunc("GET /api/device/{id}/history", s.handleHistory)
@@ -155,11 +167,12 @@ func (s *Server) Handler() http.Handler {
 // ---------- template data ----------
 
 type pageInfo struct {
-	Title         string
-	User          *auth.User
-	LogoutURL     string
-	SessionDead   bool
-	AccountNumber string
+	Title           string
+	User            *auth.User
+	LogoutURL       string
+	SessionDead     bool
+	AccountNumber   string
+	LastRosterError string
 }
 
 type DeviceView struct {
@@ -186,6 +199,7 @@ type DeviceView struct {
 	DropText          string
 	DownlinkText      string
 	UplinkText        string
+	Retired           bool
 }
 
 type statusRow struct {
@@ -201,26 +215,30 @@ type windowOpt struct {
 }
 
 type chartOpt struct {
-	Key   string
-	Title string
+	Key    string
+	Title  string
+	Series string
 }
 
 type devicePageData struct {
 	pageInfo
-	Device     DeviceView
-	AdminUser  bool
-	Windows    []windowOpt
-	Charts     []chartOpt
-	StatusRows []statusRow
+	Device       DeviceView
+	AdminUser    bool
+	Windows      []windowOpt
+	Charts       []chartOpt
+	StatusRows   []statusRow
+	CloudRows    []statusRow
+	RosterRows   []statusRow
+	ReportedRows []statusRow
+	ClientRows   []statusRow
 }
 
 type dashboardData struct {
 	pageInfo
-	Devices         []DeviceView
-	LastRosterError string
-	OnlineCount     int
-	DegradedCount   int
-	OfflineCount    int
+	Devices       []DeviceView
+	OnlineCount   int
+	DegradedCount int
+	OfflineCount  int
 }
 
 type errorData struct {
@@ -258,13 +276,15 @@ func (s *Server) logf(format string, args ...any) {
 }
 
 func (s *Server) baseInfo(r *http.Request) pageInfo {
+	s.updateMetrics()
 	u, _ := auth.UserFromContext(r.Context())
 	return pageInfo{
-		Title:         "Starlink Manager",
-		User:          u,
-		LogoutURL:     s.auth.LogoutURL(),
-		SessionDead:   s.sessionDead(),
-		AccountNumber: s.accountNumber(),
+		Title:           "Starlink Manager",
+		User:            u,
+		LogoutURL:       s.auth.LogoutURL(),
+		SessionDead:     s.sessionDead(),
+		AccountNumber:   s.accountNumber(),
+		LastRosterError: s.roster.LastError(),
 	}
 }
 
@@ -303,13 +323,14 @@ func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 	v := DeviceView{
 		ID:           d.ID,
 		Kind:         string(d.Kind),
-		DisplayName:  d.Name,
+		DisplayName:  firstNonEmpty(d.Name, d.ID),
 		Nickname:     nicknameOf(d),
 		SerialNumber: d.Serial,
 		PingText:     "—",
 		DropText:     "—",
 		DownlinkText: "—",
 		UplinkText:   "—",
+		Retired:      d.Retired != nil,
 	}
 	v.KindLabel = "Dish"
 	v.ServiceLineName = d.ServiceLine
@@ -354,7 +375,6 @@ func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 		v.VersionsText = versionsText(
 			firstNonEmpty(st.SoftwareVersion, telemetryString(d.Telemetry, "softwareVersion")),
 			st.HardwareVersion)
-		v.Alerts = deviceAlerts(d)
 		if d.Kind == starlink.KindRouter {
 			if st.Wifi != nil {
 				v.PingText = msText(st.Wifi.PingLatencyMs)
@@ -379,10 +399,40 @@ func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 	if v.VersionsText == "" {
 		v.VersionsText = orDash(telemetryString(d.Telemetry, "softwareVersion"))
 	}
+	if st := d.Status; st != nil && st.Reported != nil {
+		ping, drop := "pop_ping_latency_ms", "pop_ping_drop_rate"
+		if d.Kind == starlink.KindRouter {
+			ping, drop = "ping_latency_ms", "ping_drop_rate"
+		}
+		for path, target := range map[string]*string{
+			ping: &v.PingText, drop: &v.DropText,
+			"downlink_throughput_bps": &v.DownlinkText, "uplink_throughput_bps": &v.UplinkText,
+		} {
+			if _, present := st.Reported[path]; !present {
+				*target = "—"
+			}
+		}
+		_, fraction := st.Reported["obstruction_stats.fraction_obstructed"]
+		_, current := st.Reported["obstruction_stats.currently_obstructed"]
+		if !fraction && !current {
+			v.ObstructionText, v.ObstructionClass = "not reported", "pill-muted"
+		} else if !fraction && !st.CurrentlyObstructed {
+			v.ObstructionText, v.ObstructionClass = "not currently obstructed", "pill-muted"
+		} else if !fraction {
+			v.ObstructionText, v.ObstructionClass = "obstructed now (fraction not reported)", "pill-error"
+		}
+	}
+	v.Alerts = deviceAlerts(d)
+	if v.ObstructionClass == "" {
+		v.ObstructionClass = "pill-muted"
+	}
 	// Health is presentation-only; API reachability semantics stay unchanged.
 	v.HealthClass, v.HealthLabel = v.OnlineClass, v.OnlineLabel
 	if v.OnlineClass == "pill-ok" && (len(v.Alerts) > 0 || v.ObstructionClass == "pill-warn" || v.ObstructionClass == "pill-error") {
 		v.HealthClass, v.HealthLabel = "pill-warn", "degraded"
+	}
+	if v.Retired {
+		v.HealthClass, v.HealthLabel = "pill-muted", "retired"
 	}
 	return v
 }
@@ -442,9 +492,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		devs = append(devs, s.deviceView(d, now))
 	}
 	data := dashboardData{
-		pageInfo:        s.baseInfo(r),
-		Devices:         devs,
-		LastRosterError: s.roster.LastError(),
+		pageInfo: s.baseInfo(r),
+		Devices:  devs,
 	}
 	data.Title = "Fleet overview"
 	for _, d := range devs {
@@ -529,11 +578,24 @@ func (s *Server) deviceForAPI(w http.ResponseWriter, r *http.Request) (*starlink
 }
 
 func (s *Server) renderError(w http.ResponseWriter, r *http.Request, code int, title, msg string) {
+	info := s.baseInfo(r)
+	info.Title = fmt.Sprintf("%d · %s", code, title)
 	s.renderStatus(w, code, "error", errorData{
-		pageInfo:     s.baseInfo(r),
+		pageInfo:     info,
 		ErrorCode:    title,
 		ErrorMessage: msg,
 	})
+}
+
+func (s *Server) handleClientsPage(w http.ResponseWriter, r *http.Request) {
+	data := dashboardData{pageInfo: s.baseInfo(r)}
+	data.Title = "WiFi clients"
+	for _, d := range sortedDevices(s.store) {
+		if d.Kind == starlink.KindRouter {
+			data.Devices = append(data.Devices, s.deviceView(d, time.Now()))
+		}
+	}
+	s.render(w, "clients", data)
 }
 
 func (s *Server) handleDevicePage(w http.ResponseWriter, r *http.Request) {
@@ -554,11 +616,44 @@ func (s *Server) handleDevicePage(w http.ResponseWriter, r *http.Request) {
 			{Key: "downlink", Title: "Downlink throughput"},
 			{Key: "uplink", Title: "Uplink throughput"},
 			{Key: "obstruction", Title: "Obstruction"},
-			{Key: "scheduled", Title: "Scheduled (boresight) windows"},
+			{Key: "scheduled", Title: "Scheduled (reported flag)"},
 		},
 		StatusRows: s.statusRows(d),
+		CloudRows:  cloudRows(d.Telemetry),
+		RosterRows: detailRows(d.RosterDetails),
+		ClientRows: detailRows(d.ClientDetails),
 	}
-	data.Title = d.Name
+	if d.Status != nil {
+		data.ReportedRows = detailRows(d.Status.Reported)
+	}
+	// Supplemental SNR points stay in HTML so the established history JSON
+	// contract remains unchanged.
+	type point struct {
+		T int64   `json:"t"`
+		V float64 `json:"v"`
+	}
+	data.Charts = append(data.Charts, chartOpt{Key: "snr", Title: "SNR (reported samples)"})
+	history := downsampleSamples(s.store.History(d.ID, s.cfg.HistoryWindow), maxChartBuckets)
+	for i := range data.Charts {
+		key := data.Charts[i].Key
+		if key != "snr" && key != "scheduled" && key != "obstruction" {
+			continue
+		}
+		var points []point
+		for _, sample := range history {
+			switch {
+			case key == "snr" && sample.SNRReported:
+				points = append(points, point{sample.Ts.Unix(), sample.SNR})
+			case key == "scheduled" && sample.ScheduledReported:
+				points = append(points, point{sample.Ts.Unix(), boolGauge(sample.Scheduled)})
+			case key == "obstruction" && sample.ObstructedReported:
+				points = append(points, point{sample.Ts.Unix(), boolGauge(sample.Obstructed)})
+			}
+		}
+		series, _ := json.Marshal(points)
+		data.Charts[i].Series = string(series)
+	}
+	data.Title = data.Device.DisplayName
 	page := "device"
 	if d.Kind == starlink.KindRouter {
 		page = "router"
@@ -570,26 +665,62 @@ func (s *Server) statusRows(d *starlink.Device) []statusRow {
 	var rows []statusRow
 	st := d.Status
 	if st == nil {
-		return []statusRow{{Label: "Status", Field: "state", Value: "unreachable — no data yet"}}
+		st = &starlink.DeviceStatus{Reported: map[string]string{}}
+		rows = append(rows, statusRow{Label: "Status", Field: "gatewayStatus", Value: "unreachable — no gateway data yet"})
 	}
-	add := func(label, field, value string) { rows = append(rows, statusRow{label, field, value}) }
+	add := func(label, field, value string) {
+		paths := map[string]string{
+			"state": "state", "snr": "snr", "ping": "pop_ping_latency_ms", "drop": "pop_ping_drop_rate",
+			"down": "downlink_throughput_bps", "up": "uplink_throughput_bps", "stow": "stow_requested",
+			"obstructedNow": "obstruction_stats.currently_obstructed", "obstructionValid": "obstruction_stats.valid_s",
+			"obstruction24h": "obstruction_stats.last_24h_obstructed_s",
+			"captivePortal":  "captive_portal_enabled",
+		}
+		if d.Kind == starlink.KindRouter {
+			paths["ping"], paths["drop"] = "ping_latency_ms", "ping_drop_rate"
+		}
+		if path, ok := paths[field]; ok && st.Reported != nil {
+			if _, present := st.Reported[path]; !present {
+				value = "not reported"
+			}
+		}
+		rows = append(rows, statusRow{label, field, value})
+	}
+	add("Device ID", "deviceID", d.ID)
+	add("Service active (roster)", "active", firstNonEmpty(d.RosterDetails["Active service (roster)"], "not reported"))
+	if d.Retired != nil {
+		add("Retired at (UTC)", "retired", d.Retired.UTC().Format(time.RFC3339))
+	}
+	if d.Status == nil {
+		add("Software version (cloud)", "versions", orDash(telemetryString(d.Telemetry, "softwareVersion")))
+		add("Signal quality (cloud, 0–1)", "signalQuality", orDash(telemetryQualityText(d.Telemetry)))
+		add("Uptime (cloud)", "uptime", orDash(uptimeText(st, d.Telemetry)))
+		if alerts := deviceAlerts(d); len(alerts) > 0 {
+			add("Alerts", "alerts", strings.Join(alerts, ", "))
+		}
+		add("Last seen", "updated", lastSeenText(d))
+		return rows
+	}
 
 	if d.Kind == starlink.KindRouter {
+		add("Software version", "versions", orDash(firstNonEmpty(st.SoftwareVersion, telemetryString(d.Telemetry, "softwareVersion"))))
+		add("Hardware version", "hw", orDash(st.HardwareVersion))
 		if st.Wifi != nil {
-			add("State", "state", orDash(st.State))
-			add("Software version", "versions", orDash(st.SoftwareVersion))
-			add("Hardware version", "hw", orDash(st.HardwareVersion))
+			add("Router serial", "serial", orDash(st.Wifi.SerialNumber))
+			add("Router SKU", "sku", orDash(st.Wifi.SKU))
+			add("Captive portal enabled", "captivePortal", yesNo(st.Wifi.CaptivePortal))
 			add("WAN address", "wan", orDash(st.Wifi.IPv4WANAddress))
 			add("Ping latency", "ping", orDash(msText(st.Wifi.PingLatencyMs)))
 			add("Ping drop rate", "drop", orDash(pctText(st.Wifi.PingDropRate)))
 		}
 	} else {
-		add("State", "state", orDash(st.State))
+		add("History sample counter", "historyCounter", fmt.Sprint(d.Cursor))
+		add("State", "state", firstNonEmpty(st.State, "not reported"))
 		add("Software version", "versions",
 			orDash(firstNonEmpty(st.SoftwareVersion, telemetryString(d.Telemetry, "softwareVersion"))))
 		add("Hardware version", "hw", orDash(st.HardwareVersion))
 		add("SNR", "snr", snrText(st.SNR))
-		add("Signal quality", "signalQuality", orDash(telemetryQualityText(d.Telemetry)))
+		add("Signal quality (cloud, 0–1)", "signalQuality", orDash(telemetryQualityText(d.Telemetry)))
 		add("Ping latency", "ping", orDash(msText(st.PopPingLatencyMs)))
 		add("Ping drop rate", "drop", orDash(pctText(st.PopPingDropRate)))
 		add("Downlink", "down", orDash(bpsText(st.DownlinkThroughput)))
@@ -597,12 +728,19 @@ func (s *Server) statusRows(d *starlink.Device) []statusRow {
 		add("Currently obstructed", "obstructedNow", yesNo(st.CurrentlyObstructed))
 		add("Obstruction validity", "obstructionValid", orDash(secondsText(st.ObstructionValidS)))
 		add("Obstructed (last 24h)", "obstruction24h", orDash(secondsText(st.ObstructionLast24hS)))
-		add("Scheduled (last sample)", "scheduledFlag", yesNo(s.lastScheduled(d)))
-		add("Stow requested", "stow", yesNo(st.StowRequested))
-		add("Uptime", "uptime", orDash(uptimeText(st, d.Telemetry)))
-		if alerts := deviceAlerts(d); len(alerts) > 0 {
-			add("Alerts", "alerts", strings.Join(alerts, ", "))
+		scheduled := "no recent history"
+		if samples := s.store.History(d.ID, 15*time.Minute); len(samples) > 0 && samples[len(samples)-1].ScheduledReported {
+			scheduled = yesNo(samples[len(samples)-1].Scheduled)
 		}
+		add("Scheduled (last sample)", "scheduledFlag", scheduled)
+		add("Stow requested", "stow", yesNo(st.StowRequested))
+	}
+	add("Uptime", "uptime", orDash(uptimeText(st, d.Telemetry)))
+	if alerts := deviceAlerts(d); len(alerts) > 0 {
+		add("Alerts", "alerts", strings.Join(alerts, ", "))
+	}
+	if !st.FetchedAt.IsZero() {
+		add("Gateway snapshot (UTC)", "fetchedAt", st.FetchedAt.UTC().Format(time.RFC3339))
 	}
 	add("Last seen", "updated", lastSeenText(d))
 	return rows
@@ -653,7 +791,7 @@ func telemetryQualityText(tm map[string]any) string {
 		return ""
 	}
 	v, ok := tm["signalQuality"].(float64)
-	if !ok || v <= 0 {
+	if !ok || v < 0 {
 		return ""
 	}
 	return fmt.Sprintf("%.2f", v)
@@ -662,13 +800,18 @@ func telemetryQualityText(tm map[string]any) string {
 // uptimeText prefers the gateway-reported uptime and falls back to the
 // telemetry enrichment value (cloud-only devices).
 func uptimeText(st *starlink.DeviceStatus, tm map[string]any) string {
+	if st.Reported != nil {
+		if _, ok := st.Reported["device_state.uptime_s"]; ok {
+			return durationText(st.UptimeS)
+		}
+	}
 	if st.UptimeS > 0 {
 		return durationText(st.UptimeS)
 	}
 	if tm == nil {
 		return ""
 	}
-	if v, ok := tm["uptimeSeconds"].(float64); ok && v > 0 {
+	if v, ok := tm["uptimeSeconds"].(float64); ok && v >= 0 {
 		return durationText(uint64(v))
 	}
 	return ""
@@ -685,17 +828,6 @@ func yesNo(b bool) string {
 func durationText(s uint64) string {
 	d := time.Duration(s) * time.Second
 	return d.Round(time.Second).String()
-}
-
-// lastScheduled reports whether the most recent history sample was taken
-// during a scheduled (boresight) maintenance window. Device snapshots from
-// the store carry no samples, so read the history directly.
-func (s *Server) lastScheduled(d *starlink.Device) bool {
-	samples := s.store.History(d.ID, 15*time.Minute)
-	if len(samples) == 0 {
-		return false
-	}
-	return samples[len(samples)-1].Scheduled
 }
 
 func snrText(v *float64) string {
@@ -790,10 +922,65 @@ func obstructionBarPct(frac float64) int {
 
 // secondsText renders a fractional-seconds duration, or "" for zero.
 func secondsText(v float64) string {
-	if v <= 0 {
+	if v < 0 {
 		return ""
 	}
-	return durationText(uint64(v))
+	if v < 1 {
+		return fmt.Sprintf("%g s", v)
+	}
+	return (time.Duration(v * float64(time.Second))).Round(time.Millisecond).String()
+}
+
+func detailRows(fields map[string]string) []statusRow {
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var rows []statusRow
+	for _, key := range keys {
+		if fields[key] != "" {
+			rows = append(rows, statusRow{Label: key, Value: fields[key]})
+		}
+	}
+	return rows
+}
+
+func cloudRows(tm map[string]any) []statusRow {
+	var rows []statusRow
+	for _, field := range []struct{ key, label string }{
+		{"timestamp", "Cloud snapshot (UTC)"},
+		{"softwareVersion", "Cloud software version"},
+		{"countryCode", "Country code (cloud)"},
+		{"downlinkThroughputMbps", "Downlink (cloud, Mbps)"},
+		{"uplinkThroughputMbps", "Uplink (cloud, Mbps)"},
+		{"pingLatencyMsAvg", "Average ping (cloud, ms)"},
+		{"pingDropRateAvg", "Average ping drop (cloud, 0–1)"},
+		{"obstructionPercentTime", "Obstruction time (cloud, reported value)"},
+		{"signalQuality", "Signal quality (cloud, 0–1)"},
+		{"uptimeSeconds", "Uptime (cloud, seconds)"},
+	} {
+		if v, ok := tm[field.key]; ok {
+			text := fmt.Sprint(v)
+			if field.key == "timestamp" {
+				var ns int64
+				switch value := v.(type) {
+				case int64:
+					ns = value
+				case float64:
+					ns = int64(value)
+				}
+				if ns <= 0 {
+					continue
+				}
+				text = time.Unix(0, ns).UTC().Format(time.RFC3339)
+			}
+			if text != "" {
+				rows = append(rows, statusRow{Label: field.label, Value: text})
+			}
+		}
+	}
+	return rows
 }
 func lastSeenText(d *starlink.Device) string {
 	if d.LastSeen.IsZero() {
@@ -877,13 +1064,13 @@ func (s *Server) handleDeviceStatus(w http.ResponseWriter, r *http.Request) {
 		m[row.Field] = row.Value
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":            v.ID,
-		"onlineLabel":   v.OnlineLabel,
-		"onlineClass":   v.OnlineClass,
-		"obstruction":   v.ObstructionText,
-		"obstructionClass": v.ObstructionClass,
+		"id":                v.ID,
+		"onlineLabel":       v.OnlineLabel,
+		"onlineClass":       v.OnlineClass,
+		"obstruction":       v.ObstructionText,
+		"obstructionClass":  v.ObstructionClass,
 		"obstructionBarPct": v.ObstructionBarPct,
-		"rows":          m,
+		"rows":              m,
 	})
 }
 
@@ -962,6 +1149,9 @@ func downsampleSamples(samples []starlink.Sample, maxBuckets int) []starlink.Sam
 			agg.SNR += smp.SNR
 			agg.Obstructed = agg.Obstructed || smp.Obstructed
 			agg.Scheduled = agg.Scheduled || smp.Scheduled
+			agg.SNRReported = agg.SNRReported && smp.SNRReported
+			agg.ScheduledReported = agg.ScheduledReported && smp.ScheduledReported
+			agg.ObstructedReported = agg.ObstructedReported && smp.ObstructedReported
 		}
 		agg.PopPingLatencyMs /= float64(n)
 		agg.PopPingDropRate /= float64(n)
@@ -1009,6 +1199,7 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]apiClient, 0, len(clients))
+	s.store.SetClients(d.ID, clients)
 	for _, c := range clients {
 		band := ""
 		switch c.GetIface() {
@@ -1019,12 +1210,16 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		case device.WifiClient_ETH:
 			band = "ethernet"
 		}
+		signal := "—"
+		if c.SignalStrength != nil && c.GetIface() != device.WifiClient_ETH {
+			signal = fmt.Sprintf("%.0f dBm", c.GetSignalStrength())
+		}
 		out = append(out, apiClient{
 			Name: c.GetName(),
 			MAC:  c.GetMacAddress(),
 			Band: band,
 			IP:   c.GetIpAddress(),
-			DBm:  fmt.Sprintf("%.0f dBm", c.GetSignalStrength()),
+			DBm:  signal,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"clients": out, "count": len(out)})

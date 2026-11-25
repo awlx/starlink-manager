@@ -3,21 +3,18 @@
 <div class="page-header">
   <div class="eyebrow">Network overview</div>
   <h1>Your fleet, at a glance.</h1>
-  <p class="muted">
+  <p class="muted" data-refresh="account-state">
     {{if .AccountNumber}}Account <span class="mono">{{.AccountNumber}}</span> · {{end}}
     <span class="pill {{if or .SessionDead .LastRosterError}}pill-error{{else}}pill-ok{{end}}">{{if .SessionDead}}session invalid{{else if .LastRosterError}}roster error{{else}}account connected{{end}}</span>
   </p>
 </div>
-{{if .LastRosterError}}
-<div class="banner banner-error roster-banner" role="alert"><strong>Roster refresh failed.</strong> {{.LastRosterError}} <span>Showing the last known devices.</span></div>
-{{end}}
 
 {{if .Devices}}
-<section class="fleet-stats" aria-label="Fleet health">
+<section class="fleet-stats" aria-label="Fleet health" data-refresh="fleet-counts">
   <div class="stat-card"><span class="stat-label">Total devices</span><strong data-count="total">{{len .Devices}}</strong><span class="stat-note">Across your account</span></div>
   <div class="stat-card stat-ok"><span class="stat-label">Online</span><strong data-count="online">{{.OnlineCount}}</strong><span class="stat-note">Reachable · no active warnings</span></div>
   <div class="stat-card stat-warn"><span class="stat-label">Degraded</span><strong data-count="degraded">{{.DegradedCount}}</strong><span class="stat-note">Reachable · needs attention</span></div>
-  <div class="stat-card stat-error"><span class="stat-label">Unreachable</span><strong data-count="offline">{{.OfflineCount}}</strong><span class="stat-note">Offline or stale telemetry</span></div>
+  <div class="stat-card stat-error"><span class="stat-label">Unavailable</span><strong data-count="offline">{{.OfflineCount}}</strong><span class="stat-note">Offline, stale or retired</span></div>
 </section>
 <div class="section-heading"><div><div class="eyebrow">Hardware inventory</div><h2>Devices <span class="count-badge">{{len .Devices}}</span></h2></div><span class="muted">Select a device to explore <span aria-hidden="true">↗</span></span></div>
 <div class="grid" id="device-grid">
@@ -31,16 +28,23 @@
     <p class="device-location">{{if .ServiceLineName}}{{.ServiceLineName}}{{else}}No service name{{end}}{{if .Nickname}} · {{.Nickname}}{{end}}</p>
     <div class="device-metrics" aria-label="Latest status snapshot">
       <div><span>Ping</span><strong>{{.PingText}}</strong></div>
+      {{if eq .Kind "router"}}
+      <div><span>Ping drop</span><strong>{{.DropText}}</strong></div>
+      <div><span>WiFi clients</span><strong>View →</strong></div>
+      {{else}}
       <div><span>↓ Downlink</span><strong>{{.DownlinkText}}</strong></div>
       <div><span>↑ Uplink</span><strong>{{.UplinkText}}</strong></div>
+      {{end}}
     </div>
     <dl class="kv">
       <dt>State</dt><dd data-field="state">{{.StateLabel}}</dd>
       <dt>Ping drop</dt><dd>{{.DropText}}</dd>
-      <dt>SNR / signal</dt><dd data-field="snr">{{.SNRText}}</dd>
+      {{if eq .Kind "dish"}}<dt>SNR</dt><dd data-field="snr">{{.SNRText}}</dd>
       <dt>Obstruction</dt><dd data-field="obstruction"><span class="pill {{.ObstructionClass}}">{{.ObstructionText}}</span></dd>
+      {{end}}
       <dt>Versions</dt><dd data-field="versions">{{.VersionsText}}</dd>
     </dl>
+    {{if .Retired}}<p class="muted">Left the account roster · history retained for 24 hours; no longer polled.</p>{{end}}
     <div class="alerts" data-field="alerts">
       {{range .Alerts}}<span class="pill pill-warn">{{.}}</span>{{end}}
     </div>
@@ -52,7 +56,7 @@
 <div class="card empty-card">
   <h2>No devices found</h2>
   <p class="muted">
-    No service lines with dishes or routers were returned by the account API.
+    No devices have been discovered yet. Discovery retries automatically.
     Check that the account behind <code>STARLINK_SSO_COOKIE</code> actually has
     active service lines.
   </p>

@@ -34,7 +34,7 @@
   function drawChart(svg, series, opts) {
     var ns = "http://www.w3.org/2000/svg";
     while (svg.firstChild) svg.removeChild(svg.firstChild);
-    svg.onpointermove = svg.onpointerleave = svg.onkeydown = svg.onfocus = svg.onblur = null;
+    svg.onpointerdown = svg.onpointermove = svg.onpointerleave = svg.onkeydown = svg.onfocus = svg.onblur = null;
     var tooltip = svg.parentElement.querySelector(".chart-tooltip");
     if (tooltip) tooltip.hidden = true;
     var summary = svg.parentElement.querySelector(".chart-summary");
@@ -42,7 +42,7 @@
     // summary that an inspected sample replaced.
     restoreSummary(summary);
 
-    var W = Math.max(240, svg.clientWidth || 480), H = 180, padL = 66, padB = 24, padT = 12, padR = 12;
+    var W = Math.max(240, svg.clientWidth || 480), H = series && series.length ? 180 : 70, padL = 66, padB = 24, padT = 12, padR = 12;
     svg.setAttribute("viewBox", "0 0 " + W + " " + H);
     svg.style.aspectRatio = W + " / " + H;
     function node(tag, attrs, parent) {
@@ -85,13 +85,16 @@
 
     var d = "";
     var paths = [];
+    var ends = [];
+    var intervals = series.slice(1).map(function (p, i) { return p.t - series[i].t; }).sort(function (a, b) { return a - b; });
+    var gap = series.length >= 1000 ? Math.max(120, (intervals[Math.floor(intervals.length / 2)] || 0) * 3) : 120;
     series.forEach(function (p, i) {
       var px = x(p.t), py = y(p.v);
-      if (!i) { paths.push("M" + px + " " + py); return; }
+      if (!i) { paths.push("M" + px + " " + py); ends.push(px); return; }
       var prev = series[i - 1];
-      // Offline gaps (>2 minutes between samples) break the line instead of
-      // drawing a misleading bridge across missing data.
-      if (p.t - prev.t > 120) { paths.push("M" + px + " " + py); return; }
+      // Respect coarser downsampled windows without bridging offline gaps.
+      if (p.t - prev.t > gap) { paths.push("M" + px + " " + py); ends.push(px); return; }
+      ends[ends.length - 1] = px;
       var cur = paths[paths.length - 1];
       if (opts.binary) {
         paths[paths.length - 1] = cur + "H" + px + "V" + py;
@@ -106,12 +109,12 @@
     var gradient = node("linearGradient", { id: gradientID, x1: "0", y1: "0", x2: "0", y2: "1" }, node("defs", {}));
     node("stop", { offset: "0%", "stop-color": opts.color, "stop-opacity": ".22" }, gradient);
     node("stop", { offset: "100%", "stop-color": opts.color, "stop-opacity": ".01" }, gradient);
-    node("path", { d: paths.map(function (seg) {
+    node("path", { d: paths.map(function (seg, i) {
       // Close each continuous segment to the baseline so offline gaps do
       // not get an area fill bridging across them.
       var m = seg.match(/^M(\S+) (\S+)/);
       if (!m) return "";
-      return seg + "L" + m[1] + " " + (H - padB) + "Z";
+      return seg + "L" + ends[i] + " " + (H - padB) + "L" + m[1] + " " + (H - padB) + "Z";
     }).join(" "), fill: "url(#" + gradientID + ")" });
     node("path", { d: d, fill: "none", stroke: opts.color, "stroke-width": 1.8, "stroke-linecap": "round", "stroke-linejoin": "round", "vector-effect": "non-scaling-stroke" });
     if (series.length === 1) node("circle", { cx: x(series[0].t), cy: y(series[0].v), r: 3, fill: opts.color });
@@ -121,14 +124,16 @@
     var dot = node("circle", { r: 4, fill: opts.color, "stroke-width": 2 }, cursor);
     // var() is not valid in SVG presentation attributes; use a style.
     dot.style.stroke = "var(--bg-card)";
-    var selected = series.length - 1;
+    var selected = series.findIndex(function (p) { return p.t === Number(svg.dataset.selectedTime); });
+    if (selected < 0) selected = series.length - 1;
     function show(index, announce) {
       selected = Math.max(0, Math.min(index, series.length - 1));
       var p = series[selected], px = x(p.t);
+      svg.dataset.selectedTime = p.t;
       cursor.setAttribute("visibility", "visible");
       cross.setAttribute("x1", px); cross.setAttribute("x2", px);
       dot.setAttribute("cx", px); dot.setAttribute("cy", y(p.v));
-      var text = new Date(p.t * 1000).toLocaleString() + " · " + (opts.binary ? (p.v ? "Yes" : "No") : opts.valueFmt(p.v));
+      var text = new Date(p.t * 1000).toISOString().replace("T", " ").replace(".000Z", " UTC") + " · " + (opts.binary ? (p.v ? "Yes" : "No") : opts.valueFmt(p.v));
       if (tooltip) { tooltip.textContent = text; tooltip.hidden = false; }
       if (announce && summary) {
         if (summary.dataset.baseText == null) summary.dataset.baseText = summary.textContent;
@@ -140,7 +145,7 @@
       if (tooltip) tooltip.hidden = true;
       restoreSummary(summary);
     }
-    svg.onpointermove = function (ev) {
+    function inspect(ev) {
       var point = svg.createSVGPoint();
       point.x = ev.clientX; point.y = ev.clientY;
       var px = point.matrixTransform(svg.getScreenCTM().inverse()).x;
@@ -152,9 +157,12 @@
         else high = mid;
       }
       if (low > 0 && target - series[low - 1].t < series[low].t - target) low--;
-      show(low, false);
+      show(low, ev.pointerType === "touch");
+    }
+    svg.onpointerdown = svg.onpointermove = inspect;
+    svg.onpointerleave = function (ev) {
+      if (ev.pointerType !== "touch" && document.activeElement !== svg) hide();
     };
-    svg.onpointerleave = hide;
     svg.onfocus = function () { show(selected, true); };
     svg.onblur = hide;
     svg.onkeydown = function (ev) {
@@ -163,6 +171,7 @@
       ev.preventDefault();
       show(ev.key === "Home" ? 0 : ev.key === "End" ? series.length - 1 : selected + (ev.key === "ArrowRight" ? 1 : -1), true);
     };
+    if (document.activeElement === svg) show(selected, true);
   }
 
   /* summary formatters receive plain numbers (the plotted values) */
@@ -170,6 +179,8 @@
   function fmtPct(v) { return v.toFixed(1) + " %"; }
 
   var CHARTS = {
+    snr: { title: "SNR (reported samples)", color: "#79b8ff", lightColor: "#286ec4", valueFmt: function (v) { return v.toFixed(1); }, fmt: function (v) { return v.toFixed(1); },
+      summary: function (a) { return avgSum(a, function (v) { return v.toFixed(1); }); } },
     ping:     { title: "Ping latency (ms)", color: "#79b8ff", lightColor: "#286ec4", valueFmt: fmtMs, fmt: function (v) { return v.toFixed(0); },
                 pick: function (s) { return { t: s.ts, v: s.pingMs }; }, summary: function (a) { return avgSum(a, fmtMs); } },
     /* dropRate is a 0..1 fraction; plot it as a percentage */
@@ -182,7 +193,7 @@
     obstruction: { title: "Obstruction", color: "#f28b99", lightColor: "#b42d40", binary: true, fmt: function (v) { return v.toFixed(0); },
                 pick: function (s) { return { t: s.ts, v: s.obstructed ? 1 : 0 }; },
                 summary: function (a) { return fractionSummary(a, "of samples obstructed"); } },
-    scheduled: { title: "Scheduled (boresight) windows", color: "#f2c574", lightColor: "#8b580c", binary: true, fmt: function (v) { return v.toFixed(0); },
+    scheduled: { title: "Scheduled (reported flag)", color: "#f2c574", lightColor: "#8b580c", binary: true, fmt: function (v) { return v.toFixed(0); },
                 pick: function (s) { return { t: s.ts, v: s.scheduled ? 1 : 0 }; },
                 summary: function (a) { return fractionSummary(a, "of samples scheduled"); } }
   };
@@ -216,7 +227,7 @@
 
   function fetchJSON(url, opts) {
     return fetch(url, Object.assign({ headers: { "Accept": "application/json" } }, opts || {}))
-      .then(toResult, netError);
+      .then(toResult).catch(netError);
   }
 
   function postJSON(url, body) {
@@ -224,7 +235,7 @@
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify(body)
-    }).then(toResult, netError);
+    }).then(toResult).catch(netError);
   }
 
   function currentWindow() {
@@ -266,84 +277,74 @@
             if (sum) sum.textContent = "Could not load history. Select a window to retry.";
             return;
           }
-          var series = samples.map(CHARTS[key].pick).filter(function (p) { return p.v != null && isFinite(p.v); });
+          var series;
+          if (svg && svg.hasAttribute("data-series")) {
+            var duration = parseFloat(win) * (win.indexOf("h") >= 0 ? 3600 : 60);
+            series = JSON.parse(svg.dataset.series || "null") || [];
+            series = series.filter(function (p) { return p.t >= Date.now() / 1000 - duration; });
+          } else {
+            series = samples.map(CHARTS[key].pick).filter(function (p) { return p.v != null && isFinite(p.v); });
+          }
           chartCache[key] = { series: series, tMin: r.body.tMin };
+          if (sum) {
+            delete sum.dataset.baseText;
+            sum.textContent = series.length ? CHARTS[key].summary(series.map(function (p) { return p.v; })) : "No history collected in this window. Try a longer window or wait for the device to reconnect.";
+          }
           renderHistoryChart(key, series, r.body.tMin);
-          if (sum) sum.textContent = CHARTS[key].summary(series.map(function (p) { return p.v; })).replace("{v}", "");
         });
       });
   }
 
   function loadSummary() {
-    fetchJSON("/api/summary").then(function (r) {
+    // Reuse server-rendered presentation so roster errors, retirement and
+    // diagnostics recover together, without extending public API shapes.
+    fetch(location.pathname, { headers: { "Accept": "text/html" } }).then(function (r) {
+      if (!r.ok || r.redirected) throw new Error("refresh unavailable");
+      return r.text();
+    }).then(function (html) {
+      var next = new DOMParser().parseFromString(html, "text/html");
+      if (!next.querySelector("[data-refresh=account-banners]")) throw new Error("session changed");
       var info = document.querySelector("[data-poll-info]");
-      if (!r.ok) {
-        if (info) info.textContent = "Refresh unavailable · showing last known status";
-        return;
-      }
-      if (info) {
-        var d = r.body;
-        info.textContent = (d.sessionDead ? "Session invalid · " : "") +
-          "Status refreshed " + fmtAgo((Date.now() / 1000) - d.updatedAt) + " · every 30s";
-      }
-      var counts = { total: 0, online: 0, degraded: 0, offline: 0 };
-      (r.body.devices || []).forEach(function (dev) {
-        var healthClass = dev.onlineClass;
-        var healthLabel = dev.onlineLabel;
-        if (healthClass === "pill-ok" && ((dev.alerts || []).length || dev.obstructionClass === "pill-warn" || dev.obstructionClass === "pill-error")) {
-          healthClass = "pill-warn"; healthLabel = "degraded";
-        }
-        counts.total++;
-        counts[healthClass === "pill-ok" ? "online" : healthClass === "pill-warn" ? "degraded" : "offline"]++;
-        var root = Array.from(document.querySelectorAll(".device-card")).find(function (card) { return card.dataset.deviceId === dev.id; });
-        if (!root) return;
-        if (dev.onlineLabel != null) {
-          var pill = root.querySelector('[data-field="online"]');
-          if (pill) { pill.textContent = healthLabel; pill.className = "pill " + healthClass; }
-        }
-        ["state", "snr", "obstruction", "versions", "alerts", "updated"].forEach(function (f) {
-          if (dev[f] == null && f !== "alerts") return;
-          var el = root.querySelector('[data-field="' + f + '"]');
-          if (!el) return;
-          if (f === "alerts") {
-            el.innerHTML = (dev.alerts || []).map(function (a) {
-              return '<span class="pill pill-warn">' + esc(a) + "</span>";
-            }).join("");
-          } else if (f === "obstruction") {
-            el.innerHTML = '<span class="pill ' + (dev.obstructionClass || "pill-muted") + '">' + esc(dev.obstruction) + "</span>";
-          } else {
-            el.textContent = dev[f];
-          }
-        });
+      var error = document.getElementById("refresh-error");
+      if (error) error.hidden = true;
+      if (info) info.textContent = "Status refreshed just now · every 30s";
+      document.querySelectorAll("[data-refresh]").forEach(function (el) {
+        var fresh = next.querySelector('[data-refresh="' + el.dataset.refresh + '"]');
+        if (fresh && fresh.innerHTML !== el.innerHTML) el.innerHTML = fresh.innerHTML;
       });
-      // Count the current roster once all devices are tallied; the card
-      // inventory is a server-rendered snapshot.
-      var grid = document.getElementById("device-grid");
-      var ids = (r.body.devices || []).map(function (dev) { return dev.id; });
-      if (grid) {
-        var cards = grid.querySelectorAll(".device-card");
-        var sameRoster = cards.length === ids.length && Array.from(cards).every(function (card) { return ids.indexOf(card.dataset.deviceId) >= 0; });
-        if (sameRoster) {
-          Object.keys(counts).forEach(function (key) {
-            var el = document.querySelector('[data-count="' + key + '"]');
-            if (el) el.textContent = counts[key];
-          });
-        } else if (info) info.textContent = "Device roster changed · reload to update the inventory";
-      } else if (ids.length && document.querySelector(".empty-card") && info) {
-        info.textContent = "Devices found · reload to show them";
+      document.querySelectorAll("svg[data-series]").forEach(function (svg) {
+        var fresh = next.querySelector('svg[data-chart="' + svg.dataset.chart + '"]');
+        if (fresh) svg.dataset.series = fresh.dataset.series;
+      });
+      var cards = Array.from(document.querySelectorAll("#device-grid .device-card"));
+      var freshCards = Array.from(next.querySelectorAll("#device-grid .device-card"));
+      cards.forEach(function (card) {
+        var fresh = freshCards.find(function (c) { return c.dataset.deviceId === card.dataset.deviceId; });
+        if (fresh) card.innerHTML = fresh.innerHTML;
+      });
+      if (cards.length !== freshCards.length || cards.some(function (c) { return !freshCards.some(function (n) { return n.dataset.deviceId === c.dataset.deviceId; }); })) {
+        error.hidden = false;
+        error.textContent = "Device roster changed. Reload this page to update the inventory.";
       }
+    }).catch(function () {
+      var error = document.getElementById("refresh-error");
+      if (error) { error.hidden = false; error.textContent = "Refresh unavailable. Showing last known data; retrying every 30 seconds. Reload if your sign-in has expired."; }
     });
   }
 
   function loadClients(deviceId) {
     var tbody = document.querySelector("#clients-table tbody");
     if (!tbody) return;
-    fetchJSON("/api/device/" + deviceId + "/clients").then(function (r) {
+    var button = document.querySelector("[data-action=refresh_clients]");
+    if (button) { button.disabled = true; button.textContent = "Refreshing…"; }
+    return fetchJSON("/api/device/" + deviceId + "/clients").then(function (r) {
+      if (button) { button.disabled = false; button.textContent = "Refresh"; }
       if (!r.ok) {
         tbody.innerHTML = '<tr><td colspan="5" class="muted">' + esc(r.body.error || "failed to load clients") + "</td></tr>";
         return;
       }
       var c = r.body.clients || [];
+      loadSummary();
       if (!c.length) {
         tbody.innerHTML = '<tr><td colspan="5" class="muted">no clients connected</td></tr>';
         return;
@@ -379,14 +380,19 @@
       if (start === null) return;
       var dur = prompt("Duration in minutes:", "480");
       if (dur === null) return;
-      var enable = confirm("Enable scheduled power save (OK) or disable it (Cancel)?\nOK = enable with start " + start + " minutes past midnight UTC for " + dur + " minutes\nCancel = disable power save");
-      if (!enable && !confirm("Disable power save now?")) return;
-      btn.disabled = true;
-      postJSON("/api/device/" + id + "/action", {
-        action: "power_save", enable: enable,
-        startMinutes: parseInt(start, 10) || 0,
-        durationMinutes: parseInt(dur, 10) || 0
-      }).then(function (r) { showOutcome(r); btn.disabled = false; });
+      if (!/^\d+$/.test(start) || !/^\d+$/.test(dur) || Number(start) > 1439 || Number(dur) < 1 || Number(dur) > 1440) {
+        showOutcome({ ok: false, body: { error: "Enter whole minutes: start 0–1439 UTC, duration 1–1440." } });
+        return;
+      }
+      if (!confirm("Enable power save starting " + start + " minutes past midnight UTC for " + dur + " minutes?")) return;
+      sendAction(btn, id, {
+        action: "power_save", enable: true,
+        startMinutes: Number(start), durationMinutes: Number(dur)
+      });
+      return;
+    }
+    if (action === "disable_power_save") {
+      if (confirm("Disable scheduled power save?")) sendAction(btn, id, { action: "power_save", enable: false });
       return;
     }
 
@@ -394,11 +400,25 @@
     if (!msg) return;
     if (!confirm(msg)) return;
     ev.preventDefault();
-    btn.disabled = true;
-    postJSON("/api/device/" + id + "/action", { action: action })
-      .then(function (r) { showOutcome(r); btn.disabled = false; });
+    sendAction(btn, id, { action: action });
   });
 
+  function sendAction(btn, id, body) {
+    var buttons = Array.from(document.querySelectorAll(".action-card button"));
+    var label = btn.textContent;
+    buttons.forEach(function (b) { b.disabled = true; });
+    btn.textContent = "Sending…";
+    btn.setAttribute("aria-busy", "true");
+    var box = document.getElementById("action-outcome");
+    if (box) { box.hidden = false; box.className = "outcome"; box.textContent = "Sending command. Please wait…"; }
+    postJSON("/api/device/" + id + "/action", body).then(function (r) {
+      showOutcome(r);
+      buttons.forEach(function (b) { b.disabled = false; });
+      btn.textContent = label;
+      btn.removeAttribute("aria-busy");
+      if (document.activeElement === document.body) btn.focus();
+    });
+  }
   function showOutcome(r) {
     var box = document.getElementById("action-outcome");
     if (!box) return;
@@ -460,35 +480,8 @@
       loadClients(document.querySelector("#clients-table").getAttribute("data-device-id") ||
         document.querySelector("button[data-action=refresh_clients]").getAttribute("data-device-id"));
     }
-    loadSummary();
-    setInterval(loadSummary, 30000);
-    var pageDevice = document.getElementById("device-status");
-    if (pageDevice) {
-      var pillDeviceId = pageDevice.getAttribute("data-device-id");
-      function refreshDeviceStatus() {
-        fetchJSON("/api/device/" + pillDeviceId + "/status").then(function (r) {
-          if (!r.ok) return;
-          var rows = r.body.rows || {};
-          Object.keys(rows).forEach(function (f) {
-            var el = pageDevice.querySelector('[data-field="' + f + '"]');
-            if (el) el.textContent = rows[f];
-          });
-          var pill = document.querySelector('[data-field="online"]');
-          if (pill && r.body.onlineLabel) {
-            pill.textContent = r.body.onlineLabel;
-            pill.className = "pill " + (r.body.onlineClass || "pill-muted");
-          }
-          var obstruction = document.querySelector('[data-field="obstruction"]');
-          var line = document.querySelector('[data-field="obstructionLine"]');
-          if (obstruction && r.body.obstruction) {
-            obstruction.textContent = r.body.obstruction;
-            obstruction.className = "pill " + (r.body.obstructionClass || "pill-muted");
-            if (line) line.hidden = false;
-          }
-        });
-      }
-      refreshDeviceStatus();
-      setInterval(refreshDeviceStatus, 30000);
+    if (!document.querySelector(".error-card")) {
+      setInterval(loadSummary, 30000);
     }
   });
 })();

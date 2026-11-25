@@ -237,24 +237,26 @@ func (p *Poller) Tick() error {
 				live[t.UserTerminalID] = struct{}{}
 				liveTargets[targetID(KindDish, t.UserTerminalID)] = struct{}{}
 				p.store.UpsertDevice(&Device{
-					ID:          t.UserTerminalID,
-					Kind:        KindDish,
-					Name:        dishName(t),
-					Serial:      t.SerialNumber,
-					DishSerial:  t.DishSerialNumber,
-					ServiceLine: sl.NicknameOrNumber(),
-					Active:      t.Active,
+					ID:            t.UserTerminalID,
+					Kind:          KindDish,
+					Name:          dishName(t),
+					Serial:        t.SerialNumber,
+					DishSerial:    t.DishSerialNumber,
+					ServiceLine:   sl.NicknameOrNumber(),
+					Active:        t.Active,
+					RosterDetails: terminalDetails(t, sl),
 				})
 			}
 			for _, r := range sl.Routers {
 				live[r.RouterID] = struct{}{}
 				liveTargets[targetID(KindRouter, r.RouterID)] = struct{}{}
 				p.store.UpsertDevice(&Device{
-					ID:          r.RouterID,
-					Kind:        KindRouter,
-					Name:        routerName(r),
-					ServiceLine: sl.NicknameOrNumber(),
-					Active:      true,
+					ID:            r.RouterID,
+					Kind:          KindRouter,
+					Name:          routerName(r),
+					ServiceLine:   sl.NicknameOrNumber(),
+					Active:        true,
+					RosterDetails: routerDetails(r, sl),
 				})
 			}
 		}
@@ -289,6 +291,11 @@ func (p *Poller) Tick() error {
 					"uptimeSeconds":          tm.UptimeSeconds,
 					"countryCode":            tm.CountryCode,
 					"timestamp":              tm.UtcTimestampNs,
+				}
+				for key := range entry {
+					if tm.Present != nil && !tm.Present[key] {
+						delete(entry, key)
+					}
 				}
 				if len(tm.ActiveAlerts) > 0 {
 					entry["activeAlerts"] = tm.ActiveAlerts
@@ -434,6 +441,7 @@ func statusFromResponse(kind DeviceKind, resp *device.Response) *DeviceStatus {
 			HardwareVersion: wifi.GetDeviceInfo().GetHardwareVersion(),
 			SoftwareVersion: wifi.GetDeviceInfo().GetSoftwareVersion(),
 			UptimeS:         wifi.GetDeviceState().GetUptimeS(),
+			Reported:        reportedFields(wifi),
 			Wifi: &WifiStatusExtra{
 				SerialNumber:   wifi.GetSerialNumber(),
 				SKU:            wifi.GetSku(),
@@ -485,6 +493,7 @@ func statusFromResponse(kind DeviceKind, resp *device.Response) *DeviceStatus {
 		CurrentlyObstructed: obs.GetCurrentlyObstructed(),
 		StowRequested:       dish.GetStowRequested(),
 		Alerts:              alerts,
+		Reported:            reportedFields(dish),
 	}
 }
 

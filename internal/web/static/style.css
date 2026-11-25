@@ -60,7 +60,7 @@ main { max-width: 1440px; min-height: calc(100vh - 165px); margin: 0 auto; paddi
 .logo:hover { text-decoration: none; }
 .logo img { border: 1px solid var(--border); border-radius: 10px; }
 .brand-caption { display: block; font-size: 10px; font-weight: 500; color: var(--fg-muted); letter-spacing: .08em; text-transform: uppercase; margin-top: 3px; }
-.nav { display: flex; align-items: center; gap: 24px; font-size: 13px; }
+.nav { display: flex; align-items: center; flex-wrap: wrap; gap: 24px; font-size: 13px; }
 .nav-dashboard { color: var(--fg); }
 .user { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; color: var(--fg-muted); padding-left: 24px; border-left: 1px solid var(--border); }
 .logout { color: var(--fg-muted); }
@@ -68,7 +68,7 @@ main { max-width: 1440px; min-height: calc(100vh - 165px); margin: 0 auto; paddi
 .badge.admin { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); }
 .page-header { margin-bottom: 28px; }
 .page-header h1 { margin: 8px 0 12px; }
-.page-header p { margin: 0; }
+.page-header p { margin: 0; overflow-wrap: anywhere; }
 .eyebrow { color: var(--fg-muted); text-transform: uppercase; font-weight: 650; letter-spacing: .13em; font-size: 10px; margin-bottom: 6px; }
 .breadcrumb { display: inline-block; margin-bottom: 24px; font-size: 13px; color: var(--fg-muted); }
 .muted { color: var(--fg-muted); }
@@ -103,9 +103,11 @@ main { max-width: 1440px; min-height: calc(100vh - 165px); margin: 0 auto; paddi
 .device-location { color: var(--fg-muted); font-size: 12px; margin-bottom: 18px; overflow-wrap: anywhere; }
 .device-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; background: var(--bg-inset); border: 1px solid var(--border); padding: 12px; border-radius: 8px; margin: 0 0 18px; }
 .device-metrics span { display: block; color: var(--fg-muted); font-size: 10px; }
-.device-metrics strong { font-size: 14px; font-weight: 550; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.device-metrics strong { font-size: 14px; font-weight: 550; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .kv { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 9px 12px; font-size: 12px; margin: 0; }
-.kv dt { color: var(--fg-muted); }
+.kv dt { color: var(--fg-muted); overflow-wrap: anywhere; }
+details { margin-top: 24px; }
+summary { cursor: pointer; color: var(--link); min-height: 40px; padding: 8px 0; }
 .kv dd { margin: 0; overflow-wrap: anywhere; }
 .device-card .kv { margin-bottom: 20px; }
 .kv dd[data-field="versions"] { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; line-height: 1.8; }
@@ -136,7 +138,7 @@ main { max-width: 1440px; min-height: calc(100vh - 165px); margin: 0 auto; paddi
 .btn-danger { background: color-mix(in srgb, var(--error) 9%, transparent); border-color: color-mix(in srgb, var(--error) 35%, var(--border)); color: var(--error); }
 .btn-danger:hover { background: color-mix(in srgb, var(--error) 18%, transparent); border-color: var(--error); }
 .btn-sm { min-height: 36px; padding: 6px 12px; }
-.theme-toggle { min-height: 34px; padding: 5px 10px; font-size: 11px; color: var(--fg-muted); }
+.theme-toggle { min-height: 40px; padding: 5px 10px; font-size: 12px; color: var(--fg); }
 .window-picker { display: flex; flex-wrap: wrap; gap: 4px; background: var(--bg-inset); padding: 4px; border-radius: 10px; border: 1px solid var(--border); }
 .window-picker .btn { border-color: transparent; background: transparent; min-width: 46px; }
 .window-picker .btn:hover { background: var(--bg-hover); }
@@ -152,6 +154,7 @@ main { max-width: 1440px; min-height: calc(100vh - 165px); margin: 0 auto; paddi
 .chart-block { position: relative; background: var(--bg-inset); border: 1px solid var(--border); border-radius: 10px; padding: 18px 14px 10px; min-width: 0; }
 .chart-block h3 { margin: 0 0 12px 6px; font-size: 12px; font-weight: 550; }
 .chart { display: block; width: 100%; height: auto; aspect-ratio: 480 / 180; overflow: visible; border-radius: 4px; }
+.chart { touch-action: pan-y; }
 .chart text { fill: var(--fg-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 .chart .gridline { stroke: var(--border); stroke-dasharray: 3 5; }
 .chart .crosshair { stroke: var(--fg-muted); stroke-dasharray: 3 3; }
@@ -187,6 +190,7 @@ main { max-width: 1440px; min-height: calc(100vh - 165px); margin: 0 auto; paddi
   .topbar { padding: 16px; flex-wrap: wrap; gap: 18px; }
   .nav { width: 100%; justify-content: space-between; gap: 10px; }
   .user { font-size: 11px; gap: 7px; }
+  .user { border-left: 0; padding-left: 0; overflow-wrap: anywhere; }
   .fleet-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 28px; }
   .stat-card { padding: 16px; }
   .stat-card strong { font-size: 30px; }

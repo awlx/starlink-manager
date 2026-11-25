@@ -207,10 +207,10 @@ func TestRosterErrorBannerRendersSafely(t *testing.T) {
 	srv, _ := newTestServer(t)
 	w := httptest.NewRecorder()
 	srv.render(w, "dashboard", dashboardData{
-		LastRosterError: "upstream unavailable <retry>",
+		pageInfo: pageInfo{LastRosterError: "upstream unavailable <retry>"},
 	})
 	body := w.Body.String()
-	for _, want := range []string{`role="alert"`, "Roster refresh failed.", "upstream unavailable &lt;retry&gt;", "Showing the last known devices.", "</html>"} {
+	for _, want := range []string{`role="alert"`, "Roster refresh failed.", "upstream unavailable &lt;retry&gt;", "Showing the last known devices", "</html>"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("roster error page missing %q", want)
 		}

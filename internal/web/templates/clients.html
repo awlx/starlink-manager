@@ -1,0 +1,17 @@
+{{define "clients"}}{{template "base" .}}{{end}}
+{{define "content"}}
+<div class="page-header">
+  <a class="breadcrumb" href="/">← Fleet overview</a>
+  <h1>WiFi clients</h1>
+  <p class="muted">Client lists are available for Starlink routers, not dishes or third-party routers.</p>
+</div>
+{{if .Devices}}
+<div class="grid" id="device-grid">
+{{range .Devices}}
+<a class="card device-card" data-device-id="{{.ID}}" href="/device/{{.ID}}"><h2>{{.DisplayName}}</h2><span class="pill {{.HealthClass}}">{{.HealthLabel}}</span><p>View connected clients →</p></a>
+{{end}}
+</div>
+{{else}}
+<section class="card empty-card"><h2>No Starlink routers found</h2><p>No router is registered on this account. Dish telemetry remains available on the fleet overview.</p><a class="btn" href="/">View dishes</a></section>
+{{end}}
+{{end}}

@@ -34,6 +34,7 @@ type TerminalInfo struct {
 	LastConnected    time.Time
 	LastDisconnected time.Time
 	ServiceLine      string
+	Present          map[string]bool
 }
 
 // RouterInfo describes a router as reported by the roster.
@@ -42,6 +43,7 @@ type RouterInfo struct {
 	HardwareVersion string
 	IsBypassed      bool
 	ServiceLine     string
+	Present         map[string]bool
 }
 
 // Roster fetches and caches the account's service lines. The cached roster
@@ -178,20 +180,27 @@ func parseTerminal(m map[string]any, serviceLine string) *TerminalInfo {
 		Active:           mapBool(m, "active"),
 		IsOffline:        mapBool(m, "isOffline"),
 		ServiceLine:      serviceLine,
+		Present:          map[string]bool{},
 	}
 	t.Lat = mapFloat(m, "lat", "latitude")
 	t.Lon = mapFloat(m, "lon", "longitude")
 	t.LastConnected = mapTime(m, "lastConnected")
 	t.LastDisconnected = mapTime(m, "lastDisconnected")
+	for key, aliases := range map[string][]string{"active": {"active"}, "isOffline": {"isOffline"}, "lat": {"lat", "latitude"}, "lon": {"lon", "longitude"}} {
+		value, ok := lookup(m, aliases...)
+		t.Present[key] = ok && value != nil
+	}
 	return t
 }
 
 func parseRouter(m map[string]any, serviceLine string) *RouterInfo {
+	value, bypassed := lookup(m, "isBypassed")
 	return &RouterInfo{
 		RouterID:        mapString(m, "routerId", "id"),
 		HardwareVersion: mapString(m, "hardwareVersion"),
 		IsBypassed:      mapBool(m, "isBypassed"),
 		ServiceLine:     serviceLine,
+		Present:         map[string]bool{"isBypassed": bypassed && value != nil},
 	}
 }
 

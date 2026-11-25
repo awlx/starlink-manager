@@ -4,11 +4,12 @@
   <a class="breadcrumb" href="/">← Fleet overview</a>
   <div class="eyebrow">{{.Device.KindLabel}} telemetry</div>
   <h1>{{.Device.DisplayName}}</h1>
-  <p class="muted">
+  <p class="muted" data-refresh="device-identity">
     {{.Device.KindLabel}} · {{.Device.ServiceLineName}}
     {{if .Device.Nickname}} · {{.Device.Nickname}}{{end}} ·
     serial <code>{{.Device.SerialNumber}}</code>
     <span class="pill {{.Device.HealthClass}}" data-field="online">{{.Device.HealthLabel}}</span>
+    {{if .Device.Retired}}<span>Left the roster · history retained for 24 hours; no longer polled.</span>{{end}}
   </p>
 </div>
 
@@ -25,12 +26,12 @@
       {{end}}
     </div>
   </div>
-  <p class="chart-help muted" id="chart-help">Point at a chart to inspect a sample, or focus it and use the arrow keys. Values reflect collected telemetry.</p>
+  <p class="chart-help muted" id="chart-help">Point or tap to inspect a sample. Keyboard: arrow keys, Home/End; Escape dismisses. Timestamps are UTC. Charts show collected history at page load; select a window to refresh. Missing history is not zero.</p>
   <div class="charts">
     {{range .Charts}}
     <div class="chart-block">
       <h3>{{.Title}}</h3>
-      <svg class="chart" data-chart="{{.Key}}" data-device-id="{{$.Device.ID}}" aria-label="{{.Title}}" aria-describedby="chart-help summary-{{.Key}}" role="img" tabindex="0"></svg>
+      <svg class="chart" data-chart="{{.Key}}" {{if .Series}}data-series="{{.Series}}"{{end}} data-device-id="{{$.Device.ID}}" aria-label="{{.Title}}" aria-describedby="chart-help summary-{{.Key}}" role="img" tabindex="0"></svg>
       <div class="chart-tooltip" hidden></div>
       <p class="muted chart-summary" id="summary-{{.Key}}" data-chart-summary="{{.Key}}" aria-live="polite">Loading history…</p>
     </div>
@@ -38,7 +39,7 @@
   </div>
 </section>
 
-<section class="card" aria-labelledby="status-heading">
+<section class="card" aria-labelledby="status-heading" data-refresh="device-diagnostics">
   <div class="card-head"><div><div class="eyebrow">Device diagnostics</div><h2 id="status-heading">Current status</h2></div><span class="muted snapshot-note">Snapshot · {{.Device.LastSeenText}}</span></div>
   <p class="obstruction-line" data-field="obstructionLine">
     <span class="pill {{.Device.ObstructionClass}}" data-field="obstruction">{{.Device.ObstructionText}}</span>
@@ -51,8 +52,10 @@
     <dt>{{.Label}}</dt><dd data-field="{{.Field}}">{{.Value}}</dd>
     {{end}}
   </dl>
-  <p class="muted snapshot-note">Status snapshot at page load · refreshed every 30s. Reload for a full page update.</p>
+  <p class="muted snapshot-note">Status refreshes every 30s. Last-known values may be stale while unreachable. Cloud values have their own timestamp below.</p>
 </section>
+
+{{template "source-details" .}}
 
 {{if .AdminUser}}
 <section class="card action-card" aria-labelledby="actions-heading">
@@ -65,6 +68,7 @@
     <button class="btn" data-action="inhibit_rf" data-device-id="{{.Device.ID}}" aria-label="Inhibit RF transmission">Inhibit RF</button>
     <button class="btn" data-action="allow_rf" data-device-id="{{.Device.ID}}" aria-label="Allow RF transmission">Allow RF</button>
     <button class="btn" data-action="power_save" data-device-id="{{.Device.ID}}" aria-label="Configure power save schedule">Power save schedule</button>
+    <button class="btn" data-action="disable_power_save" data-device-id="{{.Device.ID}}" aria-label="Disable power save schedule">Disable power save</button>
   </div>
   <div id="action-outcome" class="outcome" role="status" hidden></div>
 </section>

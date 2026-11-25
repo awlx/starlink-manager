@@ -4,11 +4,12 @@
   <a class="breadcrumb" href="/">← Fleet overview</a>
   <div class="eyebrow">Router telemetry</div>
   <h1>{{.Device.DisplayName}}</h1>
-  <p class="muted">
+  <p class="muted" data-refresh="device-identity">
     Router · {{.Device.ServiceLineName}}
     {{if .Device.Nickname}} · {{.Device.Nickname}}{{end}} ·
     ID <code>{{.Device.ID}}</code>
     <span class="pill {{.Device.HealthClass}}" data-field="online">{{.Device.HealthLabel}}</span>
+    {{if .Device.Retired}}<span>Left the roster · history retained for 24 hours; no longer polled.</span>{{end}}
   </p>
 </div>
 
@@ -26,15 +27,25 @@
   </div>
 </div>
 
-<div class="card">
+<div class="card" data-refresh="device-diagnostics">
   <div class="eyebrow">Device diagnostics</div><h2>Current status</h2>
   <dl class="kv wide" id="device-status" data-device-id="{{.Device.ID}}">
     {{range .StatusRows}}
     <dt>{{.Label}}</dt><dd data-field="{{.Field}}">{{.Value}}</dd>
     {{end}}
   </dl>
-  <p class="muted snapshot-note">Snapshot · <span data-field="updated">{{.Device.LastSeenText}}</span> · refreshed every 30s. Reload for a full page update.</p>
+  <p class="muted snapshot-note">Snapshot · {{.Device.LastSeenText}} · refreshed every 30s. Last-known values may be stale while unreachable.</p>
 </div>
+{{template "source-details" .}}
+<section class="card">
+  <details>
+    <summary>Full client diagnostics</summary>
+    <p class="muted">Last successful client refresh, including association duration (seconds), mode, SNR, power-save mode, RX/TX byte counters, RX errors and spatial streams when reported. Missing fields are omitted.</p>
+    <div data-refresh="client-details">
+      {{if .ClientRows}}<dl class="kv wide">{{range .ClientRows}}<dt>{{.Label}}</dt><dd>{{.Value}}</dd>{{end}}</dl>{{else}}<p class="muted">Waiting for the first successful client refresh.</p>{{end}}
+    </div>
+  </details>
+</section>
 {{if .AdminUser}}
 <section class="card action-card" aria-labelledby="actions-heading">
   <div class="card-head"><h2 id="actions-heading">Actions</h2><span class="badge admin">admin only</span></div>

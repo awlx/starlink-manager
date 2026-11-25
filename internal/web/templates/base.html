@@ -17,6 +17,7 @@
     </div>
     <nav class="nav" aria-label="Main navigation">
       <a href="/" class="nav-dashboard">Overview</a>
+      <a href="/clients">WiFi clients</a>
       <button class="btn theme-toggle" type="button" data-theme-toggle aria-label="Switch to light theme" aria-pressed="false" hidden>Light mode</button>
       {{if .User}}
         <span class="user">
@@ -27,20 +28,48 @@
       {{end}}
     </nav>
   </header>
+  <div data-refresh="account-banners" aria-live="polite">
   {{if .SessionDead}}
   <div class="banner banner-error" role="alert">
     Starlink session invalid — re-authenticate at <a href="https://www.starlink.com/account" target="_blank" rel="noopener">starlink.com</a>
-    and update the <code>STARLINK_SSO_COOKIE</code> secret.
+    and update the <code>STARLINK_SSO_COOKIE</code> secret if it has expired. Automatic recovery retries after a 10-minute cooldown.
   </div>
   {{end}}
+  {{if .LastRosterError}}
+  <div class="banner banner-error" role="alert"><strong>Roster refresh failed.</strong> {{.LastRosterError}} Showing the last known devices; retrying automatically.</div>
+  {{end}}
+  </div>
+  <div class="banner banner-error" id="refresh-error" role="status" hidden></div>
   <main id="main" tabindex="-1">
     {{template "content" .}}
   </main>
   <footer class="footer">
     <span>FFMUC <span class="footer-divider">/</span> Starlink operations</span>
-    <span class="poll-info" data-poll-info>Telemetry snapshots · refresh every 30s</span>
+    <span class="poll-info" data-poll-info>Live status · refresh every 30s</span>
   </footer>
   <script src="/static/app.js"></script>
 </body>
 </html>
+{{end}}
+{{define "source-details"}}
+<section class="card" aria-label="Telemetry sources">
+  <div data-refresh="cloud-details">
+    <h2>Cloud telemetry</h2>
+    <p class="muted">Independent account-cache snapshot, not gateway measurements. Values can be older than the device status. The upstream ObstructionPercentTime value is shown without conversion because its scale is not confirmed.</p>
+    {{if .CloudRows}}<dl class="kv wide">{{range .CloudRows}}<dt>{{.Label}}</dt><dd>{{.Value}}</dd>{{end}}</dl>{{else}}<p class="muted">No cloud enrichment reported for this device.</p>{{end}}
+  </div>
+  <details>
+    <summary>Account roster details</summary>
+    <div data-refresh="roster-details">
+      {{if .RosterRows}}<dl class="kv wide">{{range .RosterRows}}<dt>{{.Label}}</dt><dd>{{.Value}}</dd>{{end}}</dl>{{else}}<p class="muted">No additional roster fields collected yet.</p>{{end}}
+    </div>
+  </details>
+  <details>
+    <summary>Reported gateway fields</summary>
+    <p class="muted">Only fields actually reported by firmware, including zero and false. Field suffixes: _s = seconds, _ms = milliseconds, _bps = bits/s; fractions and drop rates = 0–1; client signal_strength = dBm. Array indices start at zero. Client counters are cumulative bytes/errors; nss is spatial streams. SNR, wedge values, mode and psmode are retained as reported, without guessed units or enum meanings.</p>
+    <div data-refresh="gateway-details">
+      {{if .ReportedRows}}<dl class="kv wide">{{range .ReportedRows}}<dt>{{.Label}}</dt><dd>{{.Value}}</dd>{{end}}</dl>{{else}}<p class="muted">No field-preserving gateway snapshot yet. Waiting for the next successful poll.</p>{{end}}
+    </div>
+  </details>
+</section>
 {{end}}
