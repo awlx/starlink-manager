@@ -386,8 +386,8 @@ func statusFromResponse(kind DeviceKind, resp *device.Response) *DeviceStatus {
 				SerialNumber:   wifi.GetSerialNumber(),
 				SKU:            wifi.GetSku(),
 				IPv4WANAddress: wifi.GetIpv4WanAddress(),
-				PingDropRate:   float64(wifi.GetPingDropRate()),
-				PingLatencyMs:  float64(wifi.GetPingLatencyMs()),
+				PingDropRate:   finite(wifi.GetPingDropRate()),
+				PingLatencyMs:  finite(wifi.GetPingLatencyMs()),
 				CaptivePortal:  wifi.GetCaptivePortalEnabled(),
 			},
 		}
@@ -413,7 +413,7 @@ func statusFromResponse(kind DeviceKind, resp *device.Response) *DeviceStatus {
 	}
 	var snr *float64
 	if dish.Snr != nil {
-		v := float64(dish.GetSnr())
+		v := finite(dish.GetSnr())
 		snr = &v
 	}
 	return &DeviceStatus{
@@ -423,13 +423,13 @@ func statusFromResponse(kind DeviceKind, resp *device.Response) *DeviceStatus {
 		State:               stateName,
 		UptimeS:             state.GetUptimeS(),
 		SNR:                 snr,
-		PopPingLatencyMs:    float64(dish.GetPopPingLatencyMs()),
-		PopPingDropRate:     float64(dish.GetPopPingDropRate()),
-		DownlinkThroughput:  float64(dish.GetDownlinkThroughputBps()),
-		UplinkThroughput:    float64(dish.GetUplinkThroughputBps()),
-		ObstructionFraction: float64(obs.GetFractionObstructed()),
-		ObstructionValidS:   float64(obs.GetValidS()),
-		ObstructionLast24hS: float64(obs.GetLast_24HObstructedS()),
+		PopPingLatencyMs:    finite(dish.GetPopPingLatencyMs()),
+		PopPingDropRate:     finite(dish.GetPopPingDropRate()),
+		DownlinkThroughput:  finite(dish.GetDownlinkThroughputBps()),
+		UplinkThroughput:    finite(dish.GetUplinkThroughputBps()),
+		ObstructionFraction: finite(obs.GetFractionObstructed()),
+		ObstructionValidS:   finite(obs.GetValidS()),
+		ObstructionLast24hS: finite(obs.GetLast_24HObstructedS()),
 		CurrentlyObstructed: obs.GetCurrentlyObstructed(),
 		StowRequested:       dish.GetStowRequested(),
 		Alerts:              alerts,

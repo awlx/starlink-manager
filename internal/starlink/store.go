@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -445,9 +446,20 @@ func (s *Store) MarkSeen(id string, at time.Time) {
 
 func f32At(arr []float32, i int) float64 {
 	if i < len(arr) {
-		return float64(arr[i])
+		return finite(arr[i])
 	}
 	return 0
+}
+
+// finite converts a dish float to float64, mapping NaN and ±Inf (which
+// some dish firmware reports for unavailable values) to 0: encoding/json
+// rejects them, which would break persistence and the JSON API.
+func finite(v float32) float64 {
+	f := float64(v)
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0
+	}
+	return f
 }
 
 func bAt(arr []bool, i int) bool {

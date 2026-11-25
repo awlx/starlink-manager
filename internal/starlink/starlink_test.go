@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1077,5 +1078,36 @@ func TestStoreConcurrentSaves(t *testing.T) {
 	}
 	if n := len(loaded.Devices()); n != 50 {
 		t.Fatalf("loaded %d devices, want 50", n)
+	}
+}
+
+func TestNonFiniteDishValuesStayPersistable(t *testing.T) {
+	nan, inf := float32(math.NaN()), float32(math.Inf(1))
+	dir := t.TempDir()
+	s := NewStore(dir, 24*time.Hour, nil)
+	const id = "ut12345678-a12b3456-123456c1"
+	s.UpsertDevice(&Device{ID: id, Kind: KindDish, Name: "test"})
+	s.AppendHistory(id, &device.DishGetHistoryResponse{
+		Current:               proto.Uint64(2),
+		PopPingLatencyMs:      []float32{nan, 40},
+		PopPingDropRate:       []float32{1, 0},
+		DownlinkThroughputBps: []float32{inf, 1},
+		UplinkThroughputBps:   []float32{0, 1},
+		Snr:                   []float32{nan, 7},
+	})
+	st := statusFromResponse(KindDish, &device.Response{Response: &device.Response_DishGetStatus{
+		DishGetStatus: &device.DishGetStatusResponse{
+			PopPingLatencyMs: proto.Float32(nan),
+			ObstructionStats: &device.DishObstructionStats{FractionObstructed: proto.Float32(nan)},
+		},
+	}})
+	s.SetStatus(id, st)
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save with non-finite dish values: %v", err)
+	}
+	for _, smp := range s.History(id, time.Hour) {
+		if _, err := json.Marshal(smp); err != nil {
+			t.Fatalf("sample not JSON-encodable: %v", err)
+		}
 	}
 }
