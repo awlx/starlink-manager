@@ -28,7 +28,28 @@ network can still be monitored and controlled through the Starlink cloud.
 - `/healthz` is unauthenticated for container health checks.
 
 Everything is server-rendered Go templates plus one small dependency-free
-JavaScript file for charts — no SPA framework, no build tooling for the UI.
+JavaScript file for charts and a tiny theme initializer — no SPA framework,
+no build tooling for the UI, and no runtime CDN or font requests.
+
+### Operations dashboard
+
+- Fleet health cards distinguish online, degraded (reachable with active
+  alerts or elevated obstruction), and unreachable devices. This is a UI
+  health classification; API reachability semantics are unchanged.
+- Device cards show ping, drop rate and throughput alongside state,
+  versions, signal, obstruction and alerts. Reachability and warnings
+  refresh every 30 seconds; metrics and diagnostics are labeled snapshots
+  from page load. Reload to refresh snapshots or a changed device roster.
+- History charts have gradient fills and pointer/touch crosshairs.
+  Keyboard users can focus a chart, step through samples with the arrow
+  keys, jump with Home/End, and dismiss the tooltip with Escape. Binary
+  obstruction/scheduled series use steps, not smoothed curves. Available
+  windows (15m–3d) remain limited by `STARLINK_HISTORY_WINDOW`.
+- Dark mode is the default. The light-mode toggle remembers its choice
+  locally when browser storage is available. Both themes include visible
+  keyboard focus, responsive layouts and reduced-motion support.
+- Admin controls remain gated and require the existing confirmation
+  dialogs; the redesign makes no changes to authentication or API routes.
 
 ### Data-source decisions
 

@@ -102,7 +102,7 @@ func TestHealthzIsUnauthenticated(t *testing.T) {
 
 func TestStaticAssetsServed(t *testing.T) {
 	_, ts := newTestServer(t)
-	for _, asset := range []string{"/static/style.css", "/static/app.js"} {
+	for _, asset := range []string{"/static/style.css", "/static/app.js", "/static/theme.js"} {
 		resp, err := http.Get(ts.URL + asset)
 		if err != nil {
 			t.Fatal(err)
@@ -130,9 +130,122 @@ func TestDashboardRendersDevices(t *testing.T) {
 		t.Fatalf("dashboard status = %d", resp.StatusCode)
 	}
 	page := readAll(t, resp)
-	for _, want := range []string{"STARLINK ab12cd", "CONNECTED", "rev3", "online"} {
+	for _, want := range []string{"STARLINK ab12cd", "CONNECTED", "rev3", "online", "42 ms", "120.0 Mbps", "21.0 Mbps", "1.0 %", `data-count="online">1`, `data-count="offline">0`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("dashboard missing %q", want)
+		}
+	}
+}
+
+func TestHealthPresentationPreservesReachability(t *testing.T) {
+	srv, ts := newTestServer(t)
+	d := seedDevice(t, srv.store)
+	for _, tc := range []struct {
+		name       string
+		obstructed bool
+		fraction   float64
+		alert      bool
+		stale      bool
+		want       string
+	}{
+		{name: "clear", want: "online"},
+		{name: "active obstruction", obstructed: true, want: "degraded"},
+		{name: "elevated fraction", fraction: 0.05, want: "degraded"},
+		{name: "active alert", alert: true, want: "degraded"},
+		{name: "stale warning stays unreachable", alert: true, stale: true, want: "unreachable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d.LastSeen = time.Now()
+			if tc.stale {
+				d.LastSeen = time.Now().Add(-time.Hour)
+			}
+			d.Status.CurrentlyObstructed = tc.obstructed
+			d.Status.ObstructionFraction = tc.fraction
+			d.Status.Alerts = map[string]bool{"thermal_throttle": tc.alert}
+			v := srv.deviceView(d, time.Now())
+			if v.HealthLabel != tc.want {
+				t.Fatalf("health = %q, want %q", v.HealthLabel, tc.want)
+			}
+			if !tc.stale && v.OnlineLabel != "online" {
+				t.Fatalf("presentation changed API reachability: %q", v.OnlineLabel)
+			}
+		})
+	}
+	d.LastSeen = time.Now()
+	d.Status.CurrentlyObstructed = true
+	srv.store.UpsertDevice(d)
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	page := readAll(t, resp)
+	for _, want := range []string{`data-count="degraded">1`, `data-count="online">0`, `class="pill pill-warn" data-field="online">degraded`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("degraded dashboard missing %q", want)
+		}
+	}
+}
+
+func TestDashboardMetricsMissingAndRouter(t *testing.T) {
+	srv, _ := newTestServer(t)
+	d := seedDevice(t, srv.store)
+	d.Status = nil
+	v := srv.deviceView(d, time.Now())
+	if v.PingText != "—" || v.DropText != "—" || v.DownlinkText != "—" || v.UplinkText != "—" {
+		t.Fatalf("missing status must not look like zero traffic: %+v", v)
+	}
+	d.Kind = starlink.KindRouter
+	d.Status = &starlink.DeviceStatus{Wifi: &starlink.WifiStatusExtra{PingLatencyMs: 12, PingDropRate: 0.02}}
+	v = srv.deviceView(d, time.Now())
+	if v.PingText != "12 ms" || v.DropText != "2.0 %" || v.DownlinkText != "—" || v.UplinkText != "—" {
+		t.Fatalf("router metrics must use WiFi status: %+v", v)
+	}
+}
+
+func TestRosterErrorBannerRendersSafely(t *testing.T) {
+	srv, _ := newTestServer(t)
+	w := httptest.NewRecorder()
+	srv.render(w, "dashboard", dashboardData{
+		LastRosterError: "upstream unavailable <retry>",
+	})
+	body := w.Body.String()
+	for _, want := range []string{`role="alert"`, "Roster refresh failed.", "upstream unavailable &lt;retry&gt;", "Showing the last known devices.", "</html>"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("roster error page missing %q", want)
+		}
+	}
+}
+
+func TestRedesignedPagesPreserveViewerGating(t *testing.T) {
+	srv, _ := newTestServer(t)
+	d := seedDevice(t, srv.store)
+	srv.cfg.HistoryWindow = 72 * time.Hour
+	for _, kind := range []starlink.DeviceKind{starlink.KindDish, starlink.KindRouter} {
+		d.Kind = kind
+		srv.store.UpsertDevice(d)
+		for _, admin := range []bool{false, true} {
+			req := httptest.NewRequest(http.MethodGet, "/device/"+d.ID, nil)
+			req.SetPathValue("id", d.ID)
+			req = req.WithContext(auth.WithUser(req.Context(), &auth.User{Name: "test", Admin: admin}))
+			w := httptest.NewRecorder()
+			srv.handleDevicePage(w, req)
+			body := w.Body.String()
+			if strings.Contains(body, `data-action="reboot"`) != admin {
+				t.Errorf("%s admin=%v: action gating changed", kind, admin)
+			}
+			if !strings.Contains(body, "</html>") || !strings.Contains(body, "Current status") {
+				t.Errorf("%s: incomplete rendered page", kind)
+			}
+			if kind == starlink.KindDish {
+				for _, want := range []string{"Show 3d of history", `aria-pressed="true"`, `data-chart="scheduled"`, `data-chart="obstruction"`, `tabindex="0"`} {
+					if !strings.Contains(body, want) {
+						t.Errorf("dish missing %q", want)
+					}
+				}
+			} else if !strings.Contains(body, `id="clients-table"`) || !strings.Contains(body, `data-action="refresh_clients"`) {
+				t.Error("router clients UI missing")
+			}
 		}
 	}
 }
