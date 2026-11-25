@@ -181,13 +181,17 @@ func (s *Store) UpsertDevice(info *Device) {
 	}
 }
 
-// Devices returns a snapshot of all devices.
+// Devices returns copies of all devices with samples excluded. Callers read
+// them without the store lock while the poller keeps updating the store, so
+// they must not share the stored structs.
 func (s *Store) Devices() []*Device {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]*Device, 0, len(s.devices))
 	for _, d := range s.devices {
-		out = append(out, d)
+		cp := *d
+		cp.Samples = nil
+		out = append(out, &cp)
 	}
 	return out
 }

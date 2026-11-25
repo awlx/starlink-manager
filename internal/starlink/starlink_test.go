@@ -629,6 +629,33 @@ func TestStoreHistoryDedupeAndPersistence(t *testing.T) {
 	}
 }
 
+// TestStoreDevicesSnapshotIsolated must run under -race: readers of
+// Devices() may not share structs the poller is updating.
+func TestStoreDevicesSnapshotIsolated(t *testing.T) {
+	s := NewStore(t.TempDir(), time.Hour, nil)
+	s.UpsertDevice(&Device{ID: "ut-1", Kind: KindDish, Name: "x"})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			s.SetStatus("ut-1", &DeviceStatus{State: "CONNECTED"})
+			s.MarkSeen("ut-1", time.Now())
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		for _, d := range s.Devices() {
+			_ = d.Status
+			_ = d.LastSeen
+		}
+	}
+	<-done
+	d := s.Devices()[0]
+	d.Name = "mutated"
+	if got, _ := s.Device("ut-1"); got.Name != "x" {
+		t.Fatal("Devices() returned the stored struct")
+	}
+}
+
 func TestStorePersistenceFileLayout(t *testing.T) {
 	dir := t.TempDir()
 	s := NewStore(dir, 24*time.Hour, nil)
