@@ -4,6 +4,7 @@
 package web
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -190,15 +191,27 @@ type errorData struct {
 }
 
 func (s *Server) render(w http.ResponseWriter, page string, data any) {
+	s.renderStatus(w, http.StatusOK, page, data)
+}
+
+// renderStatus executes the page into a buffer first so headers (status,
+// Content-Type) are set before anything is written and a template error
+// yields a clean 500 instead of a truncated page.
+func (s *Server) renderStatus(w http.ResponseWriter, code int, page string, data any) {
 	t, ok := s.pages[page]
 	if !ok {
 		http.Error(w, "template missing", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := t.ExecuteTemplate(w, page, data); err != nil {
+	var buf bytes.Buffer
+	if err := t.ExecuteTemplate(&buf, page, data); err != nil {
 		s.logf("render %s failed: %v", page, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(code)
+	_, _ = buf.WriteTo(w)
 }
 
 func (s *Server) logf(format string, args ...any) {
@@ -465,8 +478,7 @@ func (s *Server) deviceForAPI(w http.ResponseWriter, r *http.Request) (*starlink
 }
 
 func (s *Server) renderError(w http.ResponseWriter, r *http.Request, code int, title, msg string) {
-	w.WriteHeader(code)
-	s.render(w, "error", errorData{
+	s.renderStatus(w, code, "error", errorData{
 		pageInfo:     s.baseInfo(r),
 		ErrorCode:    title,
 		ErrorMessage: msg,
