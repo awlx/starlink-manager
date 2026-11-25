@@ -7,11 +7,15 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
     -o /out/starlink-manager ./cmd/starlink-manager
+# Prepare the persistence directory with the ownership of the nonroot user
+# (uid/gid 65532 in distroless). A named volume mounted on /data inherits
+# this ownership on first use, so writes do not fail with EACCES.
+RUN mkdir -p /out/data && chown 65532:65532 /out/data
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/starlink-manager /usr/bin/starlink-manager
-# Persistent history is written here; mount a volume on /data.
-VOLUME ["/data"]
+COPY --from=build --chown=65532:65532 /out/data /data
+# Mount a volume on /data for persistent history (compose/Salt stack).
 ENV LISTEN_ADDR=":8080" \
     STARLINK_DATA_DIR="/data" \
     AUTH_MODE="oidc"

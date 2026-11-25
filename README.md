@@ -13,10 +13,15 @@ network can still be monitored and controlled through the Starlink cloud.
   software/hardware version, SNR, ping latency/drop rate, up/downlink
   throughput, obstruction status and alerts. Unreachable devices are shown
   as `unreachable` — the page never hangs on a dead device.
+- **Obstruction display** on the device detail page: colored badge and bar
+  (green below 2%, amber 2–10%, red above 10% or actively obstructed),
+  validity window and obstructed seconds of the last 24 hours, plus
+  obstruction and scheduled-series history charts.
 - **Per-dish history charts** (ping latency, ping drop rate, downlink and
   uplink throughput) over selectable windows. The cloud history buffer only
   holds a few minutes of samples, so the app polls regularly, merges the
-  samples and persists its own history on disk for longer windows.
+  samples and persists its own history on disk for longer windows. Large
+  windows are downsampled server-side (≤ 2000 buckets per chart).
 - **Admin actions** (behind Keycloak authentication and an admin group
   claim): reboot, stow / unstow, inhibit / allow RF, scheduled power save.
 - **Router view**: connected WiFi clients.
@@ -24,6 +29,21 @@ network can still be monitored and controlled through the Starlink cloud.
 
 Everything is server-rendered Go templates plus one small dependency-free
 JavaScript file for charts — no SPA framework, no build tooling for the UI.
+
+### Data-source decisions
+
+- Fields the dish firmware sometimes omits (software version, uptime,
+  signal quality) fall back to the cloud telemetry enrichment stored per
+  device; the gateway snapshot always wins when it reports a value.
+- Devices that disappear from the account roster are pruned after a
+  successful roster refresh, so removed hardware stops being polled and
+  rendered.
+- If the account session becomes invalid (cookie rejected), the app latches
+  a "session dead" state after repeated failures and stops polling, but it
+  retries automatically after a 10-minute cooldown and recovers as soon as
+  the account accepts the stored credentials again. A confirmed expired
+  cookie (login page without authorization code) also latches, and a fresh
+  `STARLINK_SSO_COOKIE` value restarts everything.
 
 ## Configuration
 
@@ -159,7 +179,8 @@ The intended production contract, for the Komodo/Salt stack:
 - Listens on `LISTEN_ADDR` (default `:8080`), `/healthz` unauthenticated.
 - Runs on the internal management Docker host, fronted by Traefik with
   Keycloak-based forward auth (`AUTH_MODE=forwardauth`).
-- Persistent history lives in a volume mounted at `/data`.
+- Persistent history lives in a volume mounted at `/data` (created with
+  nonroot ownership in the image, so named volumes are writable).
 
 ## Security notes
 
