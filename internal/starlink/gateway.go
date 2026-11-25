@@ -118,10 +118,7 @@ func (g *Gateway) handleOnce(ctx context.Context, req *device.Request) (*device.
 	httpReq.Header.Set("X-User-Agent", "okhttp/4.9.2")
 	httpReq.Header.Set("Origin", g.webBase)
 	httpReq.Header.Set("Accept", "application/grpc-web+proto")
-	g.session.mu.Lock()
-	tok := g.session.token
-	g.session.mu.Unlock()
-	if tok != "" {
+	if tok := g.session.currentToken(); tok != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+tok)
 	}
 	// The device gateway is a Bearer-only endpoint: cookies must not ride

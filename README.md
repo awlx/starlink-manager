@@ -36,7 +36,7 @@ clear message for invalid or missing values.
 | `LISTEN_ADDR` | `:8080` | HTTP listen address |
 | `STARLINK_SSO_COOKIE` | — | **Required.** Durable `Starlink.Com.Sso` cookie value (see [Credentials](#credentials)) |
 | `STARLINK_SESSION_TOKEN` | — | Optional pre-minted access token override (usually not needed) |
-| `STARLINK_REFRESH_COOKIES` | — | Optional seed cookie header (`Starlink.Com.Access.V1`, `.V1C1`, `.V1C2` trio from a browser session) enabling token renewal when the SSO cookie alone cannot mint tokens |
+| `STARLINK_REFRESH_COOKIES` | — | Optional seed cookie header (`Starlink.Com.Access.V1`, `.V1C1`, `.V1C2` trio from a browser session) to skip the initial silent login; normally not needed |
 | `STARLINK_ACCOUNT_NUMBER` | — | Optional account number (`ACC-…`), used when running with a pre-minted token so telemetry enrichment works without a session probe |
 | `STARLINK_API_BASE_URL` | `https://api.starlink.com` | Account API base URL |
 | `STARLINK_WEB_BASE_URL` | `https://starlink.com` | Web host used for session renewal and the device gateway |
@@ -73,6 +73,12 @@ To obtain it:
    `starlink.com`.
 3. Copy the value of the cookie named `Starlink.Com.Sso`.
 4. Set it as `STARLINK_SSO_COOKIE`.
+
+The app turns the SSO cookie into short-lived access tokens on its own: it
+runs the same silent web login the Starlink app/site performs (login →
+authorize → callback), which yields the web session cookies, and then
+renews access tokens from them. The account number is read from the access
+token, so `STARLINK_ACCOUNT_NUMBER` is only needed as an override.
 
 This cookie is long-lived; when Starlink invalidates it the UI shows a
 "session invalid" banner and the secret must be refreshed by logging in

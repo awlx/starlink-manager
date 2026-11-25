@@ -3,15 +3,19 @@ package starlink
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -55,14 +59,20 @@ type Session struct {
 	dataClient *http.Client // data client: never sends cookies (Bearer-only endpoints)
 	log        *slog.Logger
 
-	mu          sync.Mutex
-	token       string
-	tokenAt     time.Time
-	lastProbe   time.Time
+	// mu serializes token minting (single-flight) and is held across the
+	// probe/login/renewal HTTP calls. Read-only accessors used by page
+	// handlers must not take it, or rendering would block on minting.
+	mu        sync.Mutex
+	token     string // written under mu and infoMu; read under either
+	tokenAt   time.Time
+	lastProbe time.Time
+	now       func() time.Time
+
+	// infoMu guards the fields read by UI handlers and data requests.
+	infoMu      sync.Mutex
 	accountNum  string
 	accountInfo map[string]any
-	sessionDead bool
-	now         func() time.Time
+	sessionDead atomic.Bool
 }
 
 // NewSession creates a session bound to the given base URLs.
@@ -107,24 +117,37 @@ func (s *Session) DataClient() *http.Client {
 
 // SessionDead reports whether the SSO cookie has been rejected.
 func (s *Session) SessionDead() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sessionDead
+	return s.sessionDead.Load()
 }
 
 // AccountNumber returns the account number learned from the session probe,
 // or "" before the first successful probe.
 func (s *Session) AccountNumber() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.infoMu.Lock()
+	defer s.infoMu.Unlock()
 	return s.accountNum
 }
 
 // AccountInfo returns the raw account JSON from the session probe.
 func (s *Session) AccountInfo() map[string]any {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.infoMu.Lock()
+	defer s.infoMu.Unlock()
 	return s.accountInfo
+}
+
+// currentToken returns the latest minted token without waiting for an
+// in-flight mint.
+func (s *Session) currentToken() string {
+	s.infoMu.Lock()
+	defer s.infoMu.Unlock()
+	return s.token
+}
+
+// setTokenLocked must be called with s.mu held.
+func (s *Session) setTokenLocked(tok string) {
+	s.infoMu.Lock()
+	s.token = tok
+	s.infoMu.Unlock()
 }
 
 // Token returns a valid access token, minting or renewing one as needed.
@@ -153,7 +176,7 @@ func (s *Session) Ensure(ctx context.Context) error {
 func (s *Session) Refresh(ctx context.Context) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.sessionDead {
+	if s.sessionDead.Load() {
 		return "", ErrSessionDead
 	}
 	if s.token != "" {
@@ -184,7 +207,7 @@ var probeAwaitMax = 20 * time.Second
 // context — while the caller holding the mutex performs the single probe.
 // That makes every waiter converge on one shared probe.
 func (s *Session) ensureTokenLocked(ctx context.Context) (string, error) {
-	if s.sessionDead {
+	if s.sessionDead.Load() {
 		return "", ErrSessionDead
 	}
 	now := s.now()
@@ -200,7 +223,7 @@ func (s *Session) ensureTokenLocked(ctx context.Context) (string, error) {
 			return tok, nil
 		}
 		if errors.Is(err, errRenewRejected) {
-			s.token = ""
+			s.setTokenLocked("")
 		} else {
 			s.log.Warn("token renewal failed; keeping previous token", "err", err)
 			// Inside the probe rate-limit window keep the old token;
@@ -240,7 +263,7 @@ func (s *Session) ensureTokenLocked(ctx context.Context) (string, error) {
 		time.Sleep(sleep)
 		waited += sleep
 		s.mu.Lock()
-		if s.sessionDead {
+		if s.sessionDead.Load() {
 			return "", ErrSessionDead
 		}
 		// Another caller's probe may have minted a fresh token while we
@@ -303,8 +326,15 @@ func (s *Session) renewTokenLocked(ctx context.Context) (string, error) {
 // data endpoints with Bearer-only; cookies on those hosts would trigger
 // 401 token_expired responses).
 func (s *Session) applyTokenLocked(tok string, at time.Time) {
-	s.token = tok
+	s.setTokenLocked(tok)
 	s.tokenAt = at
+	if acc := accountFromJWT(tok); acc != "" {
+		s.infoMu.Lock()
+		if s.accountNum == "" {
+			s.accountNum = acc
+		}
+		s.infoMu.Unlock()
+	}
 	u := &url.URL{Scheme: "https", Host: hostOf(s.apiBase), Path: "/"}
 	s.jar.SetCookies(u, []*http.Cookie{{
 		Name:   accessCookieName,
@@ -329,8 +359,8 @@ func (s *Session) WithPresetToken(tok string) *Session {
 // with a pre-minted token and never execute a session probe (which is where
 // the account number is otherwise learned).
 func (s *Session) WithAccountNumber(acc string) *Session {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.infoMu.Lock()
+	defer s.infoMu.Unlock()
 	if acc != "" {
 		s.accountNum = acc
 	}
@@ -338,8 +368,8 @@ func (s *Session) WithAccountNumber(acc string) *Session {
 }
 
 // WithRefreshCookies installs the browser session cookie trio (Access.V1,
-// V1C1, V1C2) required by the refresh-token endpoint. STARLINK_SSO_COOKIE
-// alone is not enough to mint tokens; renewal needs these three cookies.
+// V1C1, V1C2) required by the refresh-token endpoint. They are optional:
+// without them the session obtains them through the silent login.
 // Values are parsed from a "Name=Value; Name2=Value2" cookie header.
 func (s *Session) WithRefreshCookies(header string) *Session {
 	s.mu.Lock()
@@ -379,8 +409,10 @@ func (s *Session) WithRefreshCookies(header string) *Session {
 }
 
 // probeLocked performs the session probe: GET /auth-rp/auth/user with the
-// SSO cookie. The response contains the account JSON and sets the short-
-// lived access token cookie.
+// SSO cookie. The account API answers 200, often with an empty body, and
+// does not reliably mint an access token cookie. When it does not, the
+// session falls back to renewal and then to the silent web login, which is
+// how the Starlink app/site turns the SSO cookie into an access token.
 func (s *Session) probeLocked(ctx context.Context) (string, error) {
 	s.lastProbe = s.now()
 	u := s.apiBase + "/auth-rp/auth/user"
@@ -400,20 +432,27 @@ func (s *Session) probeLocked(ctx context.Context) (string, error) {
 	case http.StatusOK:
 		// fallthrough below
 	case http.StatusUnauthorized, http.StatusForbidden:
-		s.sessionDead = true
-		s.token = ""
+		s.sessionDead.Store(true)
+		s.setTokenLocked("")
 		return "", fmt.Errorf("%w (probe answered HTTP %d)", ErrSessionDead, resp.StatusCode)
 	default:
 		return "", fmt.Errorf("session probe returned unexpected status %d", resp.StatusCode)
 	}
 
-	var account map[string]any
-	if err := json.Unmarshal(body, &account); err != nil {
-		return "", fmt.Errorf("session probe returned non-JSON body: %w (body snippet: %q)",
-			err, truncateForLog(body))
+	if len(bytes.TrimSpace(body)) > 0 {
+		var account map[string]any
+		if err := json.Unmarshal(body, &account); err != nil {
+			s.log.Warn("session probe returned a non-JSON body; ignoring it",
+				"err", err, "snippet", truncateForLog(body))
+		} else {
+			s.infoMu.Lock()
+			s.accountInfo = account
+			if acc := findAccountNumber(account); acc != "" {
+				s.accountNum = acc
+			}
+			s.infoMu.Unlock()
+		}
 	}
-	s.accountInfo = account
-	s.accountNum = findAccountNumber(account)
 
 	// Pick up the minted access token cookie, if the probe set one.
 	tok := ""
@@ -424,19 +463,189 @@ func (s *Session) probeLocked(ctx context.Context) (string, error) {
 	}
 	if tok != "" {
 		s.applyTokenLocked(tok, s.now())
-		s.sessionDead = false
+		s.sessionDead.Store(false)
 		s.log.Info("minted a fresh Starlink access token via session probe")
 		return tok, nil
 	}
-	// Probe answered but did not mint a cookie token; try renewal.
-	s.sessionDead = false
-	if tok2, err := s.renewTokenLocked(ctx); err == nil {
+	// Probe answered but did not mint a cookie token; try renewal with
+	// whatever web session cookies the jar holds.
+	tok2, err := s.renewTokenLocked(ctx)
+	if err == nil {
+		s.sessionDead.Store(false)
 		return tok2, nil
 	}
-	if s.token != "" {
-		return s.token, nil
+	if !errors.Is(err, errRenewRejected) {
+		return "", fmt.Errorf("session probe succeeded but token renewal failed: %w", err)
 	}
-	return "", errors.New("session probe succeeded but no access token could be minted")
+	// No web session yet: run the silent login with the SSO cookie, which
+	// installs the web session cookies, then renew again.
+	if err := s.silentLoginLocked(ctx); err != nil {
+		if errors.Is(err, ErrSessionDead) {
+			s.sessionDead.Store(true)
+			s.setTokenLocked("")
+		}
+		return "", err
+	}
+	tok3, err := s.renewTokenLocked(ctx)
+	if err != nil {
+		return "", fmt.Errorf("token renewal after silent login failed: %w", err)
+	}
+	s.sessionDead.Store(false)
+	s.log.Info("minted a fresh Starlink access token via silent login")
+	return tok3, nil
+}
+
+// maxLoginHops bounds the redirect chain of the silent login.
+const maxLoginHops = 10
+
+var (
+	formTagRe  = regexp.MustCompile(`(?is)<form\b[^>]*>`)
+	inputTagRe = regexp.MustCompile(`(?is)<input\b[^>]*>`)
+	attrRe     = regexp.MustCompile(`(?is)\b([a-z_:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')`)
+)
+
+// silentLoginLocked turns the SSO cookie into a starlink.com web session:
+// it starts the web login, follows the authorization redirect and submits
+// the auto-post form carrying the authorization code to the login callback,
+// which sets the web session cookies the refresh-token endpoint needs. An
+// SSO cookie that is no longer valid ends on the interactive login page
+// without a code form, which marks the session dead.
+func (s *Session) silentLoginLocked(ctx context.Context) error {
+	client := &http.Client{
+		Transport: s.http.Transport,
+		Jar:       s.jar,
+		Timeout:   s.http.Timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	returnURL := s.webBase + "/account/home"
+	start := s.webBase + "/api/auth/auth/login?returnUrl=" + url.QueryEscape(returnURL)
+	page, pageURL, err := s.loginFollow(ctx, client, http.MethodGet, start, nil)
+	if err != nil {
+		return err
+	}
+	action, fields := parseAutoPostForm(page)
+	if action == "" || fields.Get("code") == "" {
+		return fmt.Errorf("%w (silent login reached %s without an authorization code)", ErrSessionDead, pageURL.Path)
+	}
+	target, err := pageURL.Parse(action)
+	if err != nil {
+		return fmt.Errorf("silent login: bad form action: %w", err)
+	}
+	if !strings.EqualFold(target.Hostname(), hostOf(s.webBase)) {
+		return fmt.Errorf("silent login: refusing to post the authorization code to foreign host %q", target.Hostname())
+	}
+	if _, _, err := s.loginFollow(ctx, client, http.MethodPost, target.String(), fields); err != nil {
+		return err
+	}
+	return nil
+}
+
+// loginFollow performs a request and follows redirects inside the
+// /api/auth/ login flow by hand, stopping at the first non-redirect answer
+// or at a redirect that leaves the login flow (the return URL). It returns
+// the final body and URL.
+func (s *Session) loginFollow(ctx context.Context, client *http.Client, method, rawURL string, form url.Values) ([]byte, *url.URL, error) {
+	cur, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	for hop := 0; hop < maxLoginHops; hop++ {
+		var body io.Reader
+		if form != nil {
+			body = strings.NewReader(form.Encode())
+		}
+		req, err := http.NewRequestWithContext(ctx, method, cur.String(), body)
+		if err != nil {
+			return nil, nil, err
+		}
+		req.Header.Set("User-Agent", browserUA)
+		req.Header.Set("Accept", "text/html,application/xhtml+xml")
+		if form != nil {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Origin", s.webBase)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, nil, err
+		}
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if resp.StatusCode < 300 || resp.StatusCode >= 400 {
+			if resp.StatusCode != http.StatusOK {
+				return nil, nil, fmt.Errorf("silent login: %s %s answered HTTP %d", method, cur.Path, resp.StatusCode)
+			}
+			return data, cur, nil
+		}
+		loc := resp.Header.Get("Location")
+		if loc == "" {
+			return nil, nil, fmt.Errorf("silent login: redirect without Location from %s", cur.Path)
+		}
+		next, err := cur.Parse(loc)
+		if err != nil {
+			return nil, nil, fmt.Errorf("silent login: bad redirect: %w", err)
+		}
+		if !strings.EqualFold(next.Hostname(), hostOf(s.webBase)) || !strings.HasPrefix(next.Path, "/api/auth/") {
+			// Left the login flow (return URL or interactive login page).
+			return nil, next, nil
+		}
+		cur, method, form = next, http.MethodGet, nil
+	}
+	return nil, nil, errors.New("silent login: too many redirects")
+}
+
+// parseAutoPostForm extracts the action and the named input values of the
+// first form in an HTML page.
+func parseAutoPostForm(page []byte) (string, url.Values) {
+	ft := formTagRe.Find(page)
+	if ft == nil {
+		return "", nil
+	}
+	action := ""
+	for _, m := range attrRe.FindAllSubmatch(ft, -1) {
+		if strings.EqualFold(string(m[1]), "action") {
+			action = html.UnescapeString(string(m[2]) + string(m[3]))
+		}
+	}
+	fields := url.Values{}
+	for _, tag := range inputTagRe.FindAll(page, -1) {
+		var name, value string
+		for _, m := range attrRe.FindAllSubmatch(tag, -1) {
+			v := html.UnescapeString(string(m[2]) + string(m[3]))
+			switch strings.ToLower(string(m[1])) {
+			case "name":
+				name = v
+			case "value":
+				value = v
+			}
+		}
+		if name != "" {
+			fields.Set(name, value)
+		}
+	}
+	return action, fields
+}
+
+// accountFromJWT returns the account_id claim of an access token, without
+// verifying the token (it is only used to label the account in the UI and
+// address the telemetry cache).
+func accountFromJWT(tok string) string {
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		AccountID string `json:"account_id"`
+	}
+	if json.Unmarshal(raw, &claims) != nil {
+		return ""
+	}
+	return claims.AccountID
 }
 
 // findAccountNumber searches the account JSON for an account number value.
@@ -524,10 +733,7 @@ func (s *Session) attempt(ctx context.Context, method, rawURL string, body []byt
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	s.mu.Lock()
-	tok := s.token
-	s.mu.Unlock()
-	if tok != "" {
+	if tok := s.currentToken(); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	// attempt uses the data client: data endpoints must be Bearer-only
