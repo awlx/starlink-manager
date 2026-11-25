@@ -229,12 +229,10 @@ func (f *fakeAPI) defaultHandle(req *device.Request) (*device.Response, int32, s
 			}},
 		}, 0, ""
 	case *device.Request_GetHistory:
-		// 3 one-second samples ending at "now" so they fall inside the
-		// history window regardless of when the test runs.
-		now := uint64(time.Now().Unix())
+		// A 3-sample ring buffer; the counter is samples since boot.
 		return &device.Response{
 			Response: &device.Response_DishGetHistory{DishGetHistory: &device.DishGetHistoryResponse{
-				Current:               proto.Uint64(now),
+				Current:               proto.Uint64(3000),
 				PopPingLatencyMs:      []float32{40, 41, 42},
 				PopPingDropRate:       []float32{0, 0.01, 0},
 				DownlinkThroughputBps: []float32{1e8, 1.1e8, 1.2e8},
@@ -546,38 +544,49 @@ func TestGatewayRetryOnUnauthenticated(t *testing.T) {
 
 func TestStoreHistoryDedupeAndPersistence(t *testing.T) {
 	dir := t.TempDir()
-	clock := &fakeClock{now: time.Unix(200, 0)}
+	clock := &fakeClock{now: time.Unix(1_800_000_000, 0)}
 	s := NewStore(dir, 24*time.Hour, clock.Now)
-	s.UpsertDevice(&Device{ID: "ut12345678-a12b3456-123456c1", Kind: KindDish, Name: "test"})
+	const id = "ut12345678-a12b3456-123456c1"
+	s.UpsertDevice(&Device{ID: id, Kind: KindDish, Name: "test"})
 
+	// Ring buffer of 3: samples 97, 98, 99 live at indices 1, 2, 0.
 	hist := &device.DishGetHistoryResponse{
 		Current:               proto.Uint64(100),
-		PopPingLatencyMs:      []float32{40, 41, 42},
-		PopPingDropRate:       []float32{0, 0.01, 0},
-		DownlinkThroughputBps: []float32{1e8, 1.1e8, 1.2e8},
-		UplinkThroughputBps:   []float32{2e7, 2.1e7, 2.2e7},
-		Snr:                   []float32{7, 7.5, 8},
-		Scheduled:             []bool{true, true, false},
-		Obstructed:            []bool{false, true, false},
+		PopPingLatencyMs:      []float32{42, 40, 41},
+		PopPingDropRate:       []float32{0, 0, 0.01},
+		DownlinkThroughputBps: []float32{1.2e8, 1e8, 1.1e8},
+		UplinkThroughputBps:   []float32{2.2e7, 2e7, 2.1e7},
+		Snr:                   []float32{8, 7, 7.5},
+		Scheduled:             []bool{false, true, true},
+		Obstructed:            []bool{false, false, true},
 	}
-	if n := s.AppendHistory("ut12345678-a12b3456-123456c1", hist); n != 3 {
+	if n := s.AppendHistory(id, hist); n != 3 {
 		t.Fatalf("first append = %d samples, want 3", n)
 	}
+	got := s.History(id, time.Hour)
+	if got[0].PopPingLatencyMs != 40 || got[2].PopPingLatencyMs != 42 {
+		t.Fatalf("ring buffer order wrong: %+v", got)
+	}
+	// Sample timestamps are anchored at the fetch time, not at the
+	// sample counter (which counts seconds since the dish booted).
+	if got[2].Ts.Unix() != 1_800_000_000 || got[0].Ts.Unix() != 1_800_000_000-2 {
+		t.Fatalf("timestamps = %v .. %v", got[0].Ts, got[2].Ts)
+	}
 	// Same cursor again: nothing new.
-	if n := s.AppendHistory("ut12345678-a12b3456-123456c1", hist); n != 0 {
+	if n := s.AppendHistory(id, hist); n != 0 {
 		t.Fatalf("duplicate append = %d, want 0", n)
 	}
-	// New samples with advanced cursor: the two seconds after the cursor
-	// are fresh (101, 102), the first duplicates cursor 100.
+	// Two seconds later the dish took samples 100 and 101 (indices 1, 2).
+	clock.Advance(2 * time.Second)
 	hist2 := &device.DishGetHistoryResponse{
 		Current:          proto.Uint64(102),
-		PopPingLatencyMs: []float32{40, 41, 43},
-		PopPingDropRate:  []float32{0, 0.01, 0.02},
+		PopPingLatencyMs: []float32{42, 50, 43},
+		PopPingDropRate:  []float32{0, 0, 0.02},
 	}
-	if n := s.AppendHistory("ut12345678-a12b3456-123456c1", hist2); n != 2 {
+	if n := s.AppendHistory(id, hist2); n != 2 {
 		t.Fatalf("overlap append = %d, want 2", n)
 	}
-	samples := s.History("ut12345678-a12b3456-123456c1", time.Hour)
+	samples := s.History(id, time.Hour)
 	if len(samples) != 5 {
 		t.Fatalf("history len = %d, want 5", len(samples))
 	}
@@ -585,9 +594,22 @@ func TestStoreHistoryDedupeAndPersistence(t *testing.T) {
 	if last.PopPingLatencyMs != 43 || last.PopPingDropRate < 0.0199 || last.PopPingDropRate > 0.0201 {
 		t.Fatalf("last sample wrong: %+v", last)
 	}
-	// Verify timestamps line up with the cursor (current-(n-1-i)).
-	if samples[4].Ts.Unix() != 102 {
-		t.Fatalf("last sample ts = %d, want 102", samples[4].Ts.Unix())
+	if last.Ts.Unix() != 1_800_000_002 {
+		t.Fatalf("last sample ts = %d", last.Ts.Unix())
+	}
+	// The dish reboots: its counter restarts below the cursor. History
+	// must continue instead of waiting for the counter to catch up.
+	clock.Advance(10 * time.Second)
+	hist3 := &device.DishGetHistoryResponse{
+		Current:          proto.Uint64(2),
+		PopPingLatencyMs: []float32{60, 61, 0},
+	}
+	if n := s.AppendHistory(id, hist3); n != 2 {
+		t.Fatalf("append after reboot = %d, want 2", n)
+	}
+	samples = s.History(id, time.Hour)
+	if len(samples) != 7 || samples[6].PopPingLatencyMs != 61 {
+		t.Fatalf("history after reboot: %+v", samples[5:])
 	}
 
 	// Persistence roundtrip.
@@ -599,8 +621,8 @@ func TestStoreHistoryDedupeAndPersistence(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	samples2 := s2.History("ut12345678-a12b3456-123456c1", time.Hour)
-	if len(samples2) != 5 {
-		t.Fatalf("persisted history len = %d, want 5", len(samples2))
+	if len(samples2) != 7 {
+		t.Fatalf("persisted history len = %d, want 7", len(samples2))
 	}
 	if _, ok := s2.Device("ut12345678-a12b3456-123456c1"); !ok {
 		t.Fatal("persisted device missing")

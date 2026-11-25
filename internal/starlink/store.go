@@ -65,7 +65,7 @@ type Device struct {
 	Active      bool       `json:"active"`
 
 	Status    *DeviceStatus  `json:"status,omitempty"`
-	Cursor    int64          `json:"cursor,omitempty"` // newest history second seen
+	Cursor    int64          `json:"cursor,omitempty"` // dish history sample counter consumed last
 	Telemetry map[string]any `json:"telemetry,omitempty"`
 	LastSeen  time.Time      `json:"lastSeen,omitempty"`
 	Samples   []Sample       `json:"samples,omitempty"`
@@ -206,8 +206,15 @@ func (s *Store) Device(id string) (*Device, bool) {
 	return &cp, true
 }
 
-// AppendHistory merges fresh dish history samples using the cursor for
-// dedupe. The history buffer is 1 Hz ending at the `current` timestamp.
+// AppendHistory merges fresh dish history samples.
+//
+// The dish history is a ring buffer: `current` counts the samples the dish
+// has taken since boot (1 Hz), sample number k lives at index k % len, and
+// the newest sample is number current-1. Sample k was taken about
+// current-1-k seconds before the fetch. The device cursor stores the
+// `current` value consumed last, so each poll appends only the samples taken
+// since. A counter smaller than the cursor means the dish rebooted and the
+// cursor starts over.
 func (s *Store) AppendHistory(id string, hist *device.DishGetHistoryResponse) int {
 	if hist == nil {
 		return 0
@@ -220,13 +227,12 @@ func (s *Store) AppendHistory(id string, hist *device.DishGetHistoryResponse) in
 	sched := hist.GetScheduled()
 	obs := hist.GetObstructed()
 
-	n := len(lat)
+	n := int64(len(lat))
 	if n == 0 {
 		return 0
 	}
 	current := int64(hist.GetCurrent())
 	if current <= 0 {
-		// Without a usable cursor we cannot place samples on the timeline.
 		return 0
 	}
 
@@ -236,18 +242,29 @@ func (s *Store) AppendHistory(id string, hist *device.DishGetHistoryResponse) in
 	if !ok {
 		return 0
 	}
-	if current <= d.Cursor {
+	cursor := d.Cursor
+	if current < cursor {
+		cursor = 0 // the dish rebooted and restarted its sample counter
+	}
+	if current == cursor {
 		return 0
 	}
-	// Sample i covers the second current-(n-1-i).
-	cutoff := d.Cursor
+	first := max(current-n, cursor, 0)
+	fetched := s.now().Truncate(time.Second)
+	var lastTs time.Time
+	if len(d.Samples) > 0 {
+		lastTs = d.Samples[len(d.Samples)-1].Ts
+	}
 	var added int
-	for i := 0; i < n; i++ {
-		ts := time.Unix(current-int64(n-1-i), 0)
-		if int64(ts.Unix()) <= cutoff {
+	for k := first; k < current; k++ {
+		ts := fetched.Add(-time.Duration(current-1-k) * time.Second)
+		// Polls derive timestamps from their own fetch time; skip seconds
+		// already stored so jitter or a reboot cannot duplicate samples.
+		if !ts.After(lastTs) {
 			continue
 		}
-		sample := Sample{
+		i := int(k % n)
+		d.Samples = append(d.Samples, Sample{
 			Ts:                    ts,
 			PopPingLatencyMs:      f32At(lat, i),
 			PopPingDropRate:       f32At(drop, i),
@@ -256,14 +273,13 @@ func (s *Store) AppendHistory(id string, hist *device.DishGetHistoryResponse) in
 			SNR:                   f32At(snr, i),
 			Scheduled:             bAt(sched, i),
 			Obstructed:            bAt(obs, i),
-		}
-		d.Samples = append(d.Samples, sample)
+		})
+		lastTs = ts
 		added++
 	}
 	d.Cursor = current
 	d.LastSeen = s.now()
-	dirty := added > 0
-	if dirty {
+	if added > 0 {
 		s.dirty = true
 	}
 	// Trim beyond the history window (do it cheaply in bulk).
