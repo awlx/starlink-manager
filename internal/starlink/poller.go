@@ -157,8 +157,11 @@ func (p *Poller) Tick() error {
 	defer cancel()
 
 	if p.session.SessionDead() {
-		p.log.Warn("starlink session dead; skipping poll (update STARLINK_SSO_COOKIE)")
-		return nil
+		if !p.session.RecoveryDue() {
+			p.log.Warn("starlink session dead; skipping poll (recovery probe scheduled; update STARLINK_SSO_COOKIE if the cookie expired)")
+			return nil
+		}
+		p.log.Info("session dead latch expired; attempting recovery probe")
 	}
 
 	// 1. Refresh the roster (cached ~5 min internally).
@@ -168,8 +171,12 @@ func (p *Poller) Tick() error {
 		// already collected and let the caller retry with backoff.
 		return fmt.Errorf("roster unavailable: %w", err)
 	} else {
+		live := map[string]struct{}{}
+		liveTargets := map[string]struct{}{}
 		for _, sl := range lines {
 			for _, t := range sl.Terminals {
+				live[t.UserTerminalID] = struct{}{}
+				liveTargets[targetID(KindDish, t.UserTerminalID)] = struct{}{}
 				p.store.UpsertDevice(&Device{
 					ID:          t.UserTerminalID,
 					Kind:        KindDish,
@@ -181,6 +188,8 @@ func (p *Poller) Tick() error {
 				})
 			}
 			for _, r := range sl.Routers {
+				live[r.RouterID] = struct{}{}
+				liveTargets[targetID(KindRouter, r.RouterID)] = struct{}{}
 				p.store.UpsertDevice(&Device{
 					ID:          r.RouterID,
 					Kind:        KindRouter,
@@ -188,6 +197,17 @@ func (p *Poller) Tick() error {
 					ServiceLine: sl.NicknameOrNumber(),
 					Active:      true,
 				})
+			}
+		}
+		// Prune devices that left the account — but only when the roster
+		// returned something, so a transient empty answer cannot wipe the
+		// whole registry.
+		if len(live) > 0 {
+			if removed := p.store.PruneDevices(live); len(removed) > 0 {
+				p.log.Info("pruned devices no longer on the account", "count", len(removed))
+				p.gateway.PruneMutationLocks(liveTargets)
+			} else {
+				p.gateway.PruneMutationLocks(liveTargets)
 			}
 		}
 	}

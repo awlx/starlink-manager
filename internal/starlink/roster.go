@@ -108,6 +108,10 @@ func (r *Roster) Get(ctx context.Context) ([]*ServiceLine, error) {
 	r.fetched = time.Now()
 	r.err = nil
 	r.lastErr.Store(nil)
+	// A successful authenticated roster fetch proves the session is alive.
+	if r.session != nil {
+		r.session.MarkAlive()
+	}
 	return lines, nil
 }
 

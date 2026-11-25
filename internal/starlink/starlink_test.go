@@ -435,12 +435,85 @@ func TestSessionDeadOnUnauthorizedProbe(t *testing.T) {
 	f.mu.Lock()
 	f.probeStatus = 401
 	f.mu.Unlock()
+
+	// One transient 401 must not latch the session permanently.
 	_, err := s.Token(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "re-authenticate") {
 		t.Fatalf("expected session-dead error, got %v", err)
 	}
+	if s.SessionDead() {
+		t.Fatal("a single failed probe must not latch the session dead")
+	}
+
+	// A second consecutive failure (after the probe window) latches.
+	clock.Advance(2 * time.Minute)
+	if _, err := s.Token(context.Background()); err == nil {
+		t.Fatal("expected another session-dead error")
+	}
 	if !s.SessionDead() {
-		t.Fatal("SessionDead should be true")
+		t.Fatal("SessionDead should be true after repeated failures")
+	}
+}
+
+func TestSessionDeadRecovery(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	clock := &fakeClock{now: time.Now()}
+	s := newTestSession(t, ts, clock)
+	oldCooldown := deadCooldown
+	deadCooldown = time.Minute
+	t.Cleanup(func() { deadCooldown = oldCooldown })
+
+	f.mu.Lock()
+	f.probeStatus = 401
+	f.mu.Unlock()
+	_, _ = s.Token(context.Background())
+	clock.Advance(2 * time.Minute)
+	if _, err := s.Token(context.Background()); err == nil {
+		t.Fatal("expected session-dead error")
+	}
+	if !s.SessionDead() {
+		t.Fatal("session should be latched dead")
+	}
+
+	// Inside the cooldown, Token keeps failing and the poller skips.
+	if _, err := s.Token(context.Background()); err == nil || !strings.Contains(err.Error(), "re-authenticate") {
+		t.Fatalf("expected blocked error inside cooldown, got %v", err)
+	}
+
+	// Once the cooldown elapses, a successful probe recovers the session.
+	clock.Advance(2 * time.Minute)
+	f.mu.Lock()
+	f.probeStatus = 200
+	f.mu.Unlock()
+	tok, err := s.Token(context.Background())
+	if err != nil {
+		t.Fatalf("recovery probe failed: %v", err)
+	}
+	if tok == "" || s.SessionDead() {
+		t.Fatal("session should be recovered")
+	}
+}
+
+func TestMarkAliveClearsDeadLatch(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	clock := &fakeClock{now: time.Now()}
+	s := newTestSession(t, ts, clock)
+	oldCooldown := deadCooldown
+	deadCooldown = time.Minute
+	t.Cleanup(func() { deadCooldown = oldCooldown })
+
+	f.mu.Lock()
+	f.probeStatus = 401
+	f.mu.Unlock()
+	_, _ = s.Token(context.Background())
+	clock.Advance(2 * time.Minute)
+	_, _ = s.Token(context.Background())
+	if !s.SessionDead() {
+		t.Fatal("session should be latched dead")
+	}
+	s.MarkAlive()
+	if s.SessionDead() {
+		t.Fatal("MarkAlive should clear the dead latch")
 	}
 }
 

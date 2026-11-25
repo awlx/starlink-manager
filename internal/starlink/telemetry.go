@@ -59,7 +59,13 @@ func (t *Telemetry) Query(ctx context.Context, accountNumber string, afterMs int
 	if err != nil {
 		return nil, fmt.Errorf("telemetry query: %w", err)
 	}
-	return parseTelemetryResponse(data)
+	rows, err := parseTelemetryResponse(data)
+	if err == nil && t.session != nil {
+		// A successful authenticated telemetry query proves the session
+		// is alive.
+		t.session.MarkAlive()
+	}
+	return rows, err
 }
 
 func parseTelemetryResponse(data []byte) ([]*DeviceTelemetry, error) {

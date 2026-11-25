@@ -89,6 +89,18 @@ func (g *Gateway) mutationLock(target string) *sync.Mutex {
 	return m
 }
 
+// PruneMutationLocks drops per-target mutation locks for targets absent
+// from the live set, freeing memory when devices leave the account.
+func (g *Gateway) PruneMutationLocks(liveTargets map[string]struct{}) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for target := range g.mutations {
+		if _, ok := liveTargets[target]; !ok {
+			delete(g.mutations, target)
+		}
+	}
+}
+
 // Handle sends one Request to the device gateway and returns the Response.
 // On grpc-status 16 (unauthenticated) it refreshes the session and retries
 // up to twice.
@@ -184,6 +196,9 @@ func (g *Gateway) handleOnce(ctx context.Context, req *device.Request) (*device.
 	if err := proto.Unmarshal(data[0], &out); err != nil {
 		return nil, fmt.Errorf("%w: unmarshaling response: %v", ErrGateway, err)
 	}
+	// A successful authenticated gateway call proves the session is alive;
+	// clear a stale dead latch without waiting for the next probe.
+	g.session.MarkAlive()
 	return &out, nil
 }
 

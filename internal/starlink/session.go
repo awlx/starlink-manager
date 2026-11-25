@@ -68,11 +68,21 @@ type Session struct {
 	lastProbe time.Time
 	now       func() time.Time
 
+	// probeFailures counts consecutive failed session probes/renewals.
+	// After deadAfterFailures consecutive failures the session latches as
+	// dead so a flaky API does not spin probes forever.
+	probeFailures atomic.Int32
+
 	// infoMu guards the fields read by UI handlers and data requests.
 	infoMu      sync.Mutex
 	accountNum  string
 	accountInfo map[string]any
-	sessionDead atomic.Bool
+
+	// deadSince stores the unix time at which the session was latched as
+	// dead, or 0 while the session is considered alive. A latched session
+	// recovers after deadCooldown so a single transient 401 cannot brick
+	// polling permanently.
+	deadSince atomic.Int64
 }
 
 // NewSession creates a session bound to the given base URLs.
@@ -117,7 +127,71 @@ func (s *Session) DataClient() *http.Client {
 
 // SessionDead reports whether the SSO cookie has been rejected.
 func (s *Session) SessionDead() bool {
-	return s.sessionDead.Load()
+	return s.deadSince.Load() != 0
+}
+
+// deadCooldown is how long a latched session stays latched before a
+// recovery probe is attempted again. It covers both a restarted process
+// (whose in-memory probe window resets, but whose cookie is still
+// rejected) and longer API-side hiccups. It is a variable so tests can
+// shorten it.
+var deadCooldown = 10 * time.Minute
+
+// deadAfterFailures is the number of consecutive failed probes/renewals
+// tolerated before the session latches as dead.
+const deadAfterFailures = 2
+
+// latchDead marks the session dead after the configured number of
+// consecutive failures. Must be called with s.mu held.
+func (s *Session) latchDeadLocked() {
+	if s.probeFailures.Add(1) < deadAfterFailures {
+		return
+	}
+	if s.deadSince.CompareAndSwap(0, s.now().Unix()) {
+		s.log.Warn("starlink session latched as dead after repeated failures; a recovery probe runs in " + deadCooldown.String())
+	}
+}
+
+// forceLatchDead latches the session dead immediately (definitive evidence
+// such as an expired SSO cookie), bypassing the failure counter.
+func (s *Session) forceLatchDead() {
+	if s.deadSince.CompareAndSwap(0, s.now().Unix()) {
+		s.log.Warn("starlink session latched as dead; a recovery probe runs in " + deadCooldown.String())
+	}
+}
+
+// clearDead resets the dead latch and failure counter after any successful
+// authenticated call (probe, renewal or data request).
+func (s *Session) clearDead() {
+	s.deadSince.Store(0)
+	s.probeFailures.Store(0)
+}
+
+// MarkAlive clears the dead latch after a successful authenticated data
+// call, so a recovered API marks the session healthy without waiting for
+// the next probe.
+func (s *Session) MarkAlive() {
+	if s.deadSince.Load() != 0 {
+		s.clearDead()
+		s.log.Info("starlink session recovered via a successful data call")
+	}
+}
+
+// RecoveryDue reports whether a latched session is due for a recovery
+// probe (the cooldown has elapsed).
+func (s *Session) RecoveryDue() bool {
+	ts := s.deadSince.Load()
+	if ts == 0 {
+		return false
+	}
+	return s.now().Sub(time.Unix(ts, 0)) >= deadCooldown
+}
+
+// deadBlocked reports whether token work is blocked by the dead latch.
+// A latched session unblocks once the cooldown elapses; the caller then
+// attempts a recovery probe.
+func (s *Session) deadBlocked() bool {
+	return s.deadSince.Load() != 0 && !s.RecoveryDue()
 }
 
 // AccountNumber returns the account number learned from the session probe,
@@ -176,8 +250,13 @@ func (s *Session) Ensure(ctx context.Context) error {
 func (s *Session) Refresh(ctx context.Context) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.sessionDead.Load() {
+	if s.deadBlocked() {
 		return "", ErrSessionDead
+	}
+	if s.SessionDead() {
+		s.log.Info("attempting session recovery probe after cooldown")
+		s.deadSince.Store(0)
+		s.probeFailures.Store(0)
 	}
 	if s.token != "" {
 		s.tokenAt = time.Time{} // stale the token so a fresh one is minted
@@ -207,8 +286,15 @@ var probeAwaitMax = 20 * time.Second
 // context — while the caller holding the mutex performs the single probe.
 // That makes every waiter converge on one shared probe.
 func (s *Session) ensureTokenLocked(ctx context.Context) (string, error) {
-	if s.sessionDead.Load() {
+	if s.deadBlocked() {
 		return "", ErrSessionDead
+	}
+	if s.SessionDead() {
+		// Cooldown elapsed: attempt a recovery probe instead of
+		// failing every dependent caller forever.
+		s.log.Info("attempting session recovery probe after cooldown")
+		s.deadSince.Store(0)
+		s.probeFailures.Store(0)
 	}
 	now := s.now()
 	if s.token != "" && now.Sub(s.tokenAt) < tokenFreshFor {
@@ -263,8 +349,12 @@ func (s *Session) ensureTokenLocked(ctx context.Context) (string, error) {
 		time.Sleep(sleep)
 		waited += sleep
 		s.mu.Lock()
-		if s.sessionDead.Load() {
+		if s.deadBlocked() {
 			return "", ErrSessionDead
+		}
+		if s.SessionDead() {
+			s.deadSince.Store(0)
+			s.probeFailures.Store(0)
 		}
 		// Another caller's probe may have minted a fresh token while we
 		// waited; reuse it instead of probing again.
@@ -432,7 +522,7 @@ func (s *Session) probeLocked(ctx context.Context) (string, error) {
 	case http.StatusOK:
 		// fallthrough below
 	case http.StatusUnauthorized, http.StatusForbidden:
-		s.sessionDead.Store(true)
+		s.latchDeadLocked()
 		s.setTokenLocked("")
 		return "", fmt.Errorf("%w (probe answered HTTP %d)", ErrSessionDead, resp.StatusCode)
 	default:
@@ -463,7 +553,7 @@ func (s *Session) probeLocked(ctx context.Context) (string, error) {
 	}
 	if tok != "" {
 		s.applyTokenLocked(tok, s.now())
-		s.sessionDead.Store(false)
+		s.clearDead()
 		s.log.Info("minted a fresh Starlink access token via session probe")
 		return tok, nil
 	}
@@ -471,7 +561,7 @@ func (s *Session) probeLocked(ctx context.Context) (string, error) {
 	// whatever web session cookies the jar holds.
 	tok2, err := s.renewTokenLocked(ctx)
 	if err == nil {
-		s.sessionDead.Store(false)
+		s.clearDead()
 		return tok2, nil
 	}
 	if !errors.Is(err, errRenewRejected) {
@@ -481,7 +571,10 @@ func (s *Session) probeLocked(ctx context.Context) (string, error) {
 	// installs the web session cookies, then renew again.
 	if err := s.silentLoginLocked(ctx); err != nil {
 		if errors.Is(err, ErrSessionDead) {
-			s.sessionDead.Store(true)
+			// Reaching the interactive login page without an
+			// authorization code is definitive evidence that the SSO
+			// cookie is no longer accepted; latch immediately.
+			s.forceLatchDead()
 			s.setTokenLocked("")
 		}
 		return "", err
@@ -490,7 +583,7 @@ func (s *Session) probeLocked(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("token renewal after silent login failed: %w", err)
 	}
-	s.sessionDead.Store(false)
+	s.clearDead()
 	s.log.Info("minted a fresh Starlink access token via silent login")
 	return tok3, nil
 }
