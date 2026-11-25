@@ -67,18 +67,56 @@ func parseTelemetryResponse(data []byte) ([]*DeviceTelemetry, error) {
 	if err := json.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("telemetry response: %w", err)
 	}
+	// Production shape: {"data":{"values":[["u",ts,id,...],...],
+	// "columnNamesByDeviceType":{"u":[...],"r":[...]}},"metadata":{...}}.
+	// Rows are positional arrays; column names come per device type.
+	var wrapper struct {
+		Data struct {
+			Values                  []json.RawMessage   `json:"values"`
+			ColumnNamesByDeviceType map[string][]string `json:"columnNamesByDeviceType"`
+		} `json:"data"`
+	}
 	var entries []map[string]any
-	switch v := root.(type) {
-	case []any:
-		entries = toMaps(v)
-	case map[string]any:
-		// Common wrapper shapes: {"devices": [...]}, {"data": [...]}, {"results": [...]}
-		for _, key := range []string{"devices", "data", "results", "telemetry"} {
-			if raw, ok := v[key]; ok {
-				if arr, ok := raw.([]any); ok {
-					entries = toMaps(arr)
-					break
+	if err := json.Unmarshal(data, &wrapper); err == nil && len(wrapper.Data.Values) > 0 && wrapper.Data.ColumnNamesByDeviceType != nil {
+		for _, rv := range wrapper.Data.Values {
+			var row []any
+			if err := json.Unmarshal(rv, &row); err != nil {
+				continue
+			}
+			if len(row) == 0 {
+				continue
+			}
+			dtype, _ := row[0].(string)
+			cols := wrapper.Data.ColumnNamesByDeviceType[dtype]
+			if len(cols) == 0 {
+				continue
+			}
+			m := map[string]any{}
+			for i, name := range cols {
+				if i < len(row) {
+					m[name] = row[i]
 				}
+			}
+			entries = append(entries, m)
+		}
+	}
+	if entries == nil {
+		switch v := root.(type) {
+		case []any:
+			entries = toMaps(v)
+		case map[string]any:
+			// Fallback shapes: {"devices": [...]}, {"results": [...]}, object-per-device maps
+			for _, key := range []string{"devices", "data", "results", "telemetry"} {
+				if raw, ok := v[key]; ok {
+					if arr, ok := raw.([]any); ok {
+						entries = toMaps(arr)
+						break
+					}
+				}
+			}
+			if entries == nil {
+				// {"<deviceId>": {...}, ...} object-of-maps shape
+				entries = toMaps(mapValues(v))
 			}
 		}
 	}
@@ -89,6 +127,14 @@ func parseTelemetryResponse(data []byte) ([]*DeviceTelemetry, error) {
 		}
 	}
 	return out, nil
+}
+
+func mapValues(m map[string]any) []any {
+	out := make([]any, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
+	}
+	return out
 }
 
 func toMaps(arr []any) []map[string]any {
@@ -109,21 +155,26 @@ func parseTelemetryEntry(m map[string]any) *DeviceTelemetry {
 	tm := &DeviceTelemetry{
 		DeviceID:               id,
 		UtcTimestampNs:         int64(mapFloat(m, "UtcTimestampNs", "utcTimestampNs")),
-		SoftwareVersion:        mapString(m, "SoftwareVersion", "softwareVersion"),
-		DownlinkThroughputMbps: mapFloat(m, "DownlinkThroughputMbps", "downlinkThroughputMbps"),
-		UplinkThroughputMbps:   mapFloat(m, "UplinkThroughputMbps", "uplinkThroughputMbps"),
-		PingDropRateAvg:        mapFloat(m, "PingDropRateAvg", "pingDropRateAvg"),
-		PingLatencyMsAvg:       mapFloat(m, "PingLatencyMsAvg", "pingLatencyMsAvg"),
+		SoftwareVersion:        mapString(m, "RunningSoftwareVersion", "SoftwareVersion", "softwareVersion"),
+		DownlinkThroughputMbps: mapFloat(m, "DownlinkThroughputMbps", "DownlinkThroughput", "downlinkThroughputMbps"),
+		UplinkThroughputMbps:   mapFloat(m, "UplinkThroughputMbps", "UplinkThroughput", "uplinkThroughputMbps"),
+		PingDropRateAvg:        mapFloat(m, "PingDropRateAvg", "PingDropRate", "pingDropRateAvg"),
+		PingLatencyMsAvg:       mapFloat(m, "PingLatencyMsAvg", "PingLatencyMs", "pingLatencyMsAvg"),
 		ObstructionPercentTime: mapFloat(m, "ObstructionPercentTime", "obstructionPercentTime"),
 		SignalQuality:          mapFloat(m, "SignalQuality", "signalQuality"),
-		UptimeSeconds:          mapFloat(m, "UptimeSeconds", "uptimeSeconds", "Uptime"),
+		UptimeSeconds:          mapFloat(m, "UptimeSeconds", "Uptime", "uptimeSeconds", "Uptime"),
 		CountryCode:            mapString(m, "CountryCode", "countryCode"),
 	}
-	if alerts, ok := lookup(m, "ActiveAlert", "activeAlerts", "ActiveAlerts"); ok {
+	if alerts, ok := lookup(m, "ActiveAlert", "ActiveAlerts", "activeAlerts"); ok {
 		switch v := alerts.(type) {
 		case []any:
 			for _, item := range v {
 				tm.ActiveAlerts = append(tm.ActiveAlerts, fmt.Sprintf("%v", item))
+			}
+		case float64:
+			// Numeric alert codes arrive as floats in positional rows.
+			if v != 0 {
+				tm.ActiveAlerts = append(tm.ActiveAlerts, fmt.Sprintf("%d", int64(v)))
 			}
 		case string:
 			if v != "" {

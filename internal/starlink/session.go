@@ -50,18 +50,19 @@ type Session struct {
 	webBase string // https://starlink.com
 	sso     string
 
-	jar  *cookieJar
-	http *http.Client
-	log  *slog.Logger
+	jar        *cookieJar
+	http       *http.Client // auth client: carries the cookie jar (probe + renewal)
+	dataClient *http.Client // data client: never sends cookies (Bearer-only endpoints)
+	log        *slog.Logger
 
-	mu           sync.Mutex
-	token        string
-	tokenAt      time.Time
-	lastProbe    time.Time
-	accountNum   string
-	accountInfo  map[string]any
-	sessionDead  bool
-	now          func() time.Time
+	mu          sync.Mutex
+	token       string
+	tokenAt     time.Time
+	lastProbe   time.Time
+	accountNum  string
+	accountInfo map[string]any
+	sessionDead bool
+	now         func() time.Time
 }
 
 // NewSession creates a session bound to the given base URLs.
@@ -73,13 +74,14 @@ func NewSession(apiBase, webBase, ssoCookie string, client *http.Client, log *sl
 		log = slog.Default()
 	}
 	s := &Session{
-		apiBase: strings.TrimRight(apiBase, "/"),
-		webBase: strings.TrimRight(webBase, "/"),
-		sso:     ssoCookie,
-		jar:     newCookieJar(),
-		http:    client,
-		log:     log,
-		now:     time.Now,
+		apiBase:    strings.TrimRight(apiBase, "/"),
+		webBase:    strings.TrimRight(webBase, "/"),
+		sso:        ssoCookie,
+		jar:        newCookieJar(),
+		http:       client,
+		dataClient: &http.Client{Timeout: client.Timeout},
+		log:        log,
+		now:        time.Now,
 	}
 	client.Jar = s.jar
 	// The SSO cookie belongs to the starlink.com domain.
@@ -93,6 +95,14 @@ func hostOf(rawURL string) string {
 		return rawURL
 	}
 	return u.Hostname()
+}
+
+// DataClient returns a client that never sends cookies. The account API's
+// data endpoints (roster, telemetry, device gateway) reject requests that
+// carry cookies alongside the bearer token (401 token_expired), so those
+// calls must use this client.
+func (s *Session) DataClient() *http.Client {
+	return s.dataClient
 }
 
 // SessionDead reports whether the SSO cookie has been rejected.
@@ -288,17 +298,19 @@ func (s *Session) renewTokenLocked(ctx context.Context) (string, error) {
 }
 
 // applyTokenLocked stores the token and installs the access cookie so that
-// gateway calls that require the cookie receive it.
+// gateway calls that require the cookie receive it. The cookie is scoped to
+// the API host (both api.starlink.com and the starlink.com /api proxy answer
+// data endpoints with Bearer-only; cookies on those hosts would trigger
+// 401 token_expired responses).
 func (s *Session) applyTokenLocked(tok string, at time.Time) {
 	s.token = tok
 	s.tokenAt = at
-	// Mirror the token into the cookie jar for the starlink.com domain.
-	u := &url.URL{Scheme: "https", Host: "starlink.com", Path: "/"}
+	u := &url.URL{Scheme: "https", Host: hostOf(s.apiBase), Path: "/"}
 	s.jar.SetCookies(u, []*http.Cookie{{
 		Name:   accessCookieName,
 		Value:  tok,
 		Path:   "/",
-		Domain: "starlink.com",
+		Domain: hostOf(s.apiBase),
 		Secure: true,
 	}})
 }
@@ -310,6 +322,59 @@ func (s *Session) WithPresetToken(tok string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.applyTokenLocked(tok, s.now())
+	return s
+}
+
+// WithAccountNumber supplies the account number for deployments that run
+// with a pre-minted token and never execute a session probe (which is where
+// the account number is otherwise learned).
+func (s *Session) WithAccountNumber(acc string) *Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if acc != "" {
+		s.accountNum = acc
+	}
+	return s
+}
+
+// WithRefreshCookies installs the browser session cookie trio (Access.V1,
+// V1C1, V1C2) required by the refresh-token endpoint. STARLINK_SSO_COOKIE
+// alone is not enough to mint tokens; renewal needs these three cookies.
+// Values are parsed from a "Name=Value; Name2=Value2" cookie header.
+func (s *Session) WithRefreshCookies(header string) *Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u := &url.URL{Scheme: "https", Host: hostOf(s.webBase), Path: "/"}
+	for _, part := range strings.Split(header, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		switch name {
+		case "Starlink.Com.Access.V1", "Starlink.Com.Access.V1C1", "Starlink.Com.Access.V1C2":
+			s.jar.SetCookies(u, []*http.Cookie{{
+				Name:   name,
+				Value:  value,
+				Path:   "/",
+				Domain: hostOf(s.webBase),
+				Secure: true,
+			}})
+		case ssoCookieName:
+			s.jar.SetCookies(u, []*http.Cookie{{
+				Name:   ssoCookieName,
+				Value:  value,
+				Path:   "/",
+				Domain: hostOf(s.webBase),
+				Secure: true,
+			}})
+		}
+	}
 	return s
 }
 
@@ -376,7 +441,7 @@ func (s *Session) probeLocked(ctx context.Context) (string, error) {
 
 // findAccountNumber searches the account JSON for an account number value.
 func findAccountNumber(m map[string]any) string {
-	candidates := []string{"accountNumber", "account_number", "accNumber", "account"}
+	candidates := []string{"accountNumber", "accountId", "account_number", "accNumber", "account"}
 	for _, key := range candidates {
 		if v, ok := m[key]; ok {
 			switch val := v.(type) {
@@ -465,7 +530,9 @@ func (s *Session) attempt(ctx context.Context, method, rawURL string, body []byt
 	if tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
-	resp, err := s.http.Do(req)
+	// attempt uses the data client: data endpoints must be Bearer-only
+	// (cookies would trigger 401 token_expired).
+	resp, err := s.dataClient.Do(req)
 	if err != nil {
 		return nil, nil, err
 	}

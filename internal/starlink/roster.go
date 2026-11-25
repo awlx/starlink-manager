@@ -14,10 +14,10 @@ import (
 // ServiceLine is one service line from the account roster with its nested
 // user terminals and routers.
 type ServiceLine struct {
-	Number     string
-	Nickname   string
-	Terminals  []*TerminalInfo
-	Routers    []*RouterInfo
+	Number    string
+	Nickname  string
+	Terminals []*TerminalInfo
+	Routers   []*RouterInfo
 }
 
 // TerminalInfo describes a dish (user terminal) as reported by the roster.
@@ -100,17 +100,29 @@ func (r *Roster) fetch(ctx context.Context) ([]*ServiceLine, error) {
 		if err != nil {
 			return nil, fmt.Errorf("fetching service lines page %d: %w", page, err)
 		}
+		// Response envelope: {"content":{"totalCount":..,"results":[...]},"errors":..,"isValid":..}.
+		// Older raw-array shapes are still accepted for robustness.
+		var env struct {
+			Content struct {
+				TotalCount int              `json:"totalCount"`
+				IsLastPage bool             `json:"isLastPage"`
+				Results    []map[string]any `json:"results"`
+			} `json:"content"`
+		}
 		var raw []map[string]any
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf("service lines page %d: %w", page, err)
+		if err := json.Unmarshal(data, &env); err == nil {
+			raw = env.Content.Results
+		} else {
+			if err := json.Unmarshal(data, &raw); err != nil {
+				return nil, fmt.Errorf("service lines page %d: %w", page, err)
+			}
 		}
 		for _, entry := range raw {
 			out = append(out, parseServiceLine(entry))
 		}
-		if len(raw) < 100 {
+		if env.Content.IsLastPage || len(raw) < 100 {
 			break
 		}
-		// isLastPage hints are honored implicitly by the short page.
 	}
 	return out, nil
 }

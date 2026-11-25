@@ -3,7 +3,7 @@
 // Three modes are supported (selected via AUTH_MODE):
 //   - oidc:       Keycloak (or any OIDC provider) authorization-code flow
 //   - forwardauth: trust X-Forwarded-* headers injected by a reverse-proxy
-//                  forward-auth service (e.g. Traefik + noc-auth)
+//     forward-auth service (e.g. Traefik + noc-auth)
 //   - localdev:   every request is treated as an authenticated admin
 //
 // In all modes a signed session cookie carries the resolved user identity

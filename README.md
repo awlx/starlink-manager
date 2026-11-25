@@ -36,6 +36,8 @@ clear message for invalid or missing values.
 | `LISTEN_ADDR` | `:8080` | HTTP listen address |
 | `STARLINK_SSO_COOKIE` | — | **Required.** Durable `Starlink.Com.Sso` cookie value (see [Credentials](#credentials)) |
 | `STARLINK_SESSION_TOKEN` | — | Optional pre-minted access token override (usually not needed) |
+| `STARLINK_REFRESH_COOKIES` | — | Optional seed cookie header (`Starlink.Com.Access.V1`, `.V1C1`, `.V1C2` trio from a browser session) enabling token renewal when the SSO cookie alone cannot mint tokens |
+| `STARLINK_ACCOUNT_NUMBER` | — | Optional account number (`ACC-…`), used when running with a pre-minted token so telemetry enrichment works without a session probe |
 | `STARLINK_API_BASE_URL` | `https://api.starlink.com` | Account API base URL |
 | `STARLINK_WEB_BASE_URL` | `https://starlink.com` | Web host used for session renewal and the device gateway |
 | `STARLINK_POLL_INTERVAL` | `30s` | Roster/status/telemetry polling cadence (min 2s; the cloud updates roughly every 2 min per device) |

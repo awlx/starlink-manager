@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -123,7 +124,8 @@ func (g *Gateway) handleOnce(ctx context.Context, req *device.Request) (*device.
 	if tok != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+tok)
 	}
-	// The session cookie (SSO + access token) rides along via the cookie jar.
+	// The device gateway is a Bearer-only endpoint: cookies must not ride
+	// along (the account API rejects cookie+Bearer with 401 token_expired).
 
 	resp, err := g.client.Do(httpReq)
 	if err != nil {
@@ -147,7 +149,16 @@ func (g *Gateway) handleOnce(ctx context.Context, req *device.Request) (*device.
 	}
 	code, msg, err := parseGRPCStatus(trailers)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrGateway, err)
+		// Error responses may carry grpc-status as an HTTP response header
+		// instead of a trailers frame (empty body, status-only answer).
+		if hs := resp.Header.Get("grpc-status"); hs != "" {
+			if n, perr := strconv.ParseInt(hs, 10, 32); perr == nil {
+				code, msg, err = int32(n), resp.Header.Get("grpc-message"), nil
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrGateway, err)
+		}
 	}
 	if code != 0 {
 		return nil, classifyGRPCStatus(code, msg)

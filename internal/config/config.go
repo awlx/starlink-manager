@@ -33,27 +33,29 @@ type Config struct {
 	ListenAddr string
 
 	// Starlink account API (the API the Starlink app/site uses).
-	StarlinkAPIBaseURL   string // e.g. https://api.starlink.com
-	StarlinkWebBaseURL   string // e.g. https://starlink.com
-	StarlinkSSOCookie    string // durable Starlink.Com.Sso cookie value
-	StarlinkSessionToken string // optional pre-minted access token override
+	StarlinkAPIBaseURL     string // e.g. https://api.starlink.com
+	StarlinkWebBaseURL     string // e.g. https://starlink.com
+	StarlinkSSOCookie      string // durable Starlink.Com.Sso cookie value
+	StarlinkSessionToken   string // optional pre-minted access token override
+	StarlinkRefreshCookies string // optional seed cookie header (Access trio) for token renewal
+	StarlinkAccountNumber  string // optional account number (used when the session probe never runs)
 
-	PollInterval    time.Duration // roster/telemetry/status polling cadence
-	HistoryWindow   time.Duration // length of persisted per-device history
-	CallTimeout     time.Duration // per device-call timeout
-	DataDir         string        // persisted history directory
-	RosterCacheTTL  time.Duration
+	PollInterval       time.Duration // roster/telemetry/status polling cadence
+	HistoryWindow      time.Duration // length of persisted per-device history
+	CallTimeout        time.Duration // per device-call timeout
+	DataDir            string        // persisted history directory
+	RosterCacheTTL     time.Duration
 	TelemetryTTLOnline time.Duration // telemetry age before "offline" in UI
 
-	AuthMode          AuthMode
-	OIDCIssuerURL     string
-	OIDCClientID      string
-	OIDCClientSecret  string
-	OIDCRedirectURL   string
-	OIDCAdminGroups   []string
-	OIDCAdminClaim    string
+	AuthMode           AuthMode
+	OIDCIssuerURL      string
+	OIDCClientID       string
+	OIDCClientSecret   string
+	OIDCRedirectURL    string
+	OIDCAdminGroups    []string
+	OIDCAdminClaim     string
 	ForwardAuthHeaders ForwardAuthHeaders
-	LocalDevUser      bool
+	LocalDevUser       bool
 
 	SessionCookieSecret []byte
 	SessionCookieSecure bool // set when serving over HTTPS
@@ -103,8 +105,10 @@ func load(getenv func(string) string) (Config, error) {
 
 	cfg.StarlinkSSOCookie = strings.TrimSpace(getenv("STARLINK_SSO_COOKIE"))
 	cfg.StarlinkSessionToken = strings.TrimSpace(getenv("STARLINK_SESSION_TOKEN"))
-	if cfg.StarlinkSSOCookie == "" && cfg.StarlinkSessionToken == "" {
-		return cfg, errors.New("STARLINK_SSO_COOKIE is required: set it to the Starlink.Com.Sso cookie value from a browser login at starlink.com (or provide STARLINK_SESSION_TOKEN to use a pre-minted access token)")
+	cfg.StarlinkRefreshCookies = strings.TrimSpace(getenv("STARLINK_REFRESH_COOKIES"))
+	cfg.StarlinkAccountNumber = strings.TrimSpace(getenv("STARLINK_ACCOUNT_NUMBER"))
+	if cfg.StarlinkSSOCookie == "" && cfg.StarlinkSessionToken == "" && cfg.StarlinkRefreshCookies == "" {
+		return cfg, errors.New("STARLINK_SSO_COOKIE is required: set it to the Starlink.Com.Sso cookie value from a browser login at starlink.com (or provide STARLINK_SESSION_TOKEN to use a pre-minted access token, or STARLINK_REFRESH_COOKIES to seed the session cookies)")
 	}
 
 	var err error
@@ -288,4 +292,3 @@ func randomBytes(n int) []byte {
 	}
 	return b
 }
-

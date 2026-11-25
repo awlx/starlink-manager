@@ -41,8 +41,8 @@ func run() error {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	// Starlink session + device gateway share one HTTP client so the
-	// cookie jar (SSO + access cookies) is applied consistently.
+	// Auth client carries the cookie jar (probe + token renewal); data
+	// endpoints use a separate cookie-free client (Bearer-only).
 	client := &http.Client{Timeout: 2 * cfg.CallTimeout}
 	session := starlink.NewSession(cfg.StarlinkAPIBaseURL, cfg.StarlinkWebBaseURL,
 		cfg.StarlinkSSOCookie, client, log)
@@ -50,7 +50,15 @@ func run() error {
 		session.WithPresetToken(cfg.StarlinkSessionToken)
 		log.Info("using pre-minted access token override")
 	}
-	gateway := starlink.NewGateway(session, cfg.StarlinkWebBaseURL, client, log)
+	if cfg.StarlinkRefreshCookies != "" {
+		session.WithRefreshCookies(cfg.StarlinkRefreshCookies)
+		log.Info("seeded session cookies for token renewal")
+	}
+	if cfg.StarlinkAccountNumber != "" {
+		session.WithAccountNumber(cfg.StarlinkAccountNumber)
+		log.Info("using configured account number", "account", cfg.StarlinkAccountNumber)
+	}
+	gateway := starlink.NewGateway(session, cfg.StarlinkWebBaseURL, session.DataClient(), log)
 	roster := starlink.NewRoster(session, cfg.StarlinkAPIBaseURL, cfg.RosterCacheTTL, log)
 	telemetry := starlink.NewTelemetry(session, cfg.StarlinkAPIBaseURL, log)
 

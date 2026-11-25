@@ -51,7 +51,7 @@ func (c *fakeClock) Advance(d time.Duration) {
 type fakeAPI struct {
 	mu            sync.Mutex
 	probeCount    int
-	probeStatus   int          // override status for the probe endpoint
+	probeStatus   int           // override status for the probe endpoint
 	probeDelay    time.Duration // artificial delay for the probe endpoint
 	handleFn      func(req *device.Request) (*device.Response, int32, string)
 	tokenRenewed  int
@@ -89,6 +89,18 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
 	})
 
 	mux.HandleFunc("/api/auth/auth/refresh-token", func(w http.ResponseWriter, r *http.Request) {
+		// The refresh endpoint requires the Access.V1 chunk trio; without it
+		// the real API answers 401, so mirror that here.
+		need := map[string]bool{}
+		for _, c := range r.Cookies() {
+			need[c.Name] = true
+		}
+		for _, present := range need {
+			if !present {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+		}
 		f.mu.Lock()
 		f.tokenRenewed++
 		n := f.tokenRenewed
@@ -99,7 +111,7 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
 
 	mux.HandleFunc("/webagg/v2/accounts/service-lines", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `[{
+		fmt.Fprintf(w, `{"content":{"totalCount":1,"pageIndex":0,"limit":100,"isLastPage":true,"results":[{
 			"serviceLineNumber": "SL-TEST-1",
 			"nickname": "FFMUC Dach",
 			"userTerminals": [{
@@ -115,7 +127,7 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
 				"hardwareVersion": "rev3",
 				"isBypassed": false
 			}]
-		}]`)
+		}]},"errors":[],"warnings":[],"information":[],"isValid":true}`)
 	})
 
 	mux.HandleFunc("/device-data/cache/v1/telemetry", func(w http.ResponseWriter, r *http.Request) {
@@ -128,10 +140,11 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"devices":[{"DeviceId":"ut12345678-a12b3456-123456c1","UtcTimestampNs":1700000000000000000,
-			"SoftwareVersion":"2024.05.01","DownlinkThroughputMbps":120.5,"UplinkThroughputMbps":18.5,
-			"PingDropRateAvg":0.01,"PingLatencyMsAvg":42,"ObstructionPercentTime":0.5,"SignalQuality":0.8,
-			"UptimeSeconds":86400,"CountryCode":"DE","ActiveAlert":[82]}]}`)
+		// Positional-row shape the production API returns: per-device-type
+		// column names plus one row array per sample.
+		fmt.Fprintf(w, `{"data":{"values":[["u",1700000000000000000,"ut12345678-a12b3456-123456c1",120.5,18.5,0.01,42,0.5,86400,0.8,0,-1,"2024.05.01","DE",false,[82]]],
+			"columnNamesByDeviceType":{"u":["DeviceType","UtcTimestampNs","DeviceId","DownlinkThroughput","UplinkThroughput","PingDropRateAvg","PingLatencyMsAvg","ObstructionPercentTime","Uptime","SignalQuality","H3CellId","SecondsUntilSwupdateRebootPossible","RunningSoftwareVersion","CountryCode","InTerritorialWaters","ActiveAlerts"]}},
+			"metadata":{"enums":{"DeviceType":{"u":"UserTerminal"},"AlertsByDeviceType":{"u":{"82":"software_update_reboot_pending"}}}}}`)
 	})
 
 	mux.HandleFunc("/api/SpaceX.API.Device.Device/Handle", func(w http.ResponseWriter, r *http.Request) {
@@ -184,29 +197,30 @@ func (f *fakeAPI) defaultHandle(req *device.Request) (*device.Response, int32, s
 		if strings.HasPrefix(target, "Router-") {
 			return &device.Response{
 				Response: &device.Response_WifiGetStatus{WifiGetStatus: &device.WifiGetStatusResponse{
-					DeviceInfo:   &device.DeviceInfo{HardwareVersion: proto.String("rev3"), SoftwareVersion: proto.String("wifi-2024.1")},
-					DeviceState:  &device.DeviceState{UptimeS: proto.Uint64(7200)},
-					SerialNumber: proto.String("ROUTER-SN-1"),
-					Sku:          proto.String("UTR-42"),
+					DeviceInfo:     &device.DeviceInfo{HardwareVersion: proto.String("rev3"), SoftwareVersion: proto.String("wifi-2024.1")},
+					DeviceState:    &device.DeviceState{UptimeS: proto.Uint64(7200)},
+					SerialNumber:   proto.String("ROUTER-SN-1"),
+					Sku:            proto.String("UTR-42"),
 					Ipv4WanAddress: proto.String("10.20.30.40"),
-					PingDropRate: proto.Float32(0.001),
-					PingLatencyMs: proto.Float32(38.5),
+					PingDropRate:   proto.Float32(0.001),
+					PingLatencyMs:  proto.Float32(38.5),
 				}},
 			}, 0, ""
 		}
 		return &device.Response{
 			Response: &device.Response_DishGetStatus{DishGetStatus: &device.DishGetStatusResponse{
-				DeviceInfo:   &device.DeviceInfo{HardwareVersion: proto.String("rev4"), SoftwareVersion: proto.String("2024.05.01")},
-				DeviceState:  &device.DeviceState{UptimeS: proto.Uint64(86400)},
-				State:        device.DishState_CONNECTED.Enum(),
-				Snr:          proto.Float32(7.5),
-				PopPingLatencyMs: proto.Float32(42),
-				PopPingDropRate: proto.Float32(0.005),
+				DeviceInfo:            &device.DeviceInfo{HardwareVersion: proto.String("rev4"), SoftwareVersion: proto.String("2024.05.01")},
+				DeviceState:           &device.DeviceState{UptimeS: proto.Uint64(86400)},
+				State:                 device.DishState_CONNECTED.Enum(),
+				Snr:                   proto.Float32(7.5),
+				PopPingLatencyMs:      proto.Float32(42),
+				PopPingDropRate:       proto.Float32(0.005),
 				DownlinkThroughputBps: proto.Float32(125000000),
-				UplinkThroughputBps: proto.Float32(20000000),
+				UplinkThroughputBps:   proto.Float32(20000000),
 				ObstructionStats: &device.DishObstructionStats{
-					FractionObstructed: proto.Float32(0.004),
-					ValidS:             proto.Float32(86400),
+					FractionObstructed:  proto.Float32(0.004),
+					ValidS:              proto.Float32(86400),
+					Last_24HObstructedS: proto.Float32(600),
 					CurrentlyObstructed: proto.Bool(true),
 				},
 				StowRequested: proto.Bool(false),
@@ -258,6 +272,8 @@ func writeGRPCWebResponse(w http.ResponseWriter, resp *device.Response, code int
 // newTestSession builds a session against the fake API with a fake clock.
 func newTestSession(t *testing.T, ts *httptest.Server, clock *fakeClock) *Session {
 	s := NewSession(ts.URL, ts.URL, "sso-cookie-test", ts.Client(), nil)
+	// Seed the Access trio the refresh endpoint requires.
+	s.WithRefreshCookies("Starlink.Com.Access.V1=v1; Starlink.Com.Access.V1C1=c1; Starlink.Com.Access.V1C2=c2")
 	s.now = clock.Now
 	return s
 }
@@ -322,8 +338,8 @@ func TestSessionProbeMintsToken(t *testing.T) {
 	if f.probeCount != 1 {
 		t.Fatalf("probeCount = %d, want 1", f.probeCount)
 	}
-	// Access cookie is mirrored into the jar for starlink.com.
-	snap := s.jar.snapshot()["starlink.com"]
+	// Access cookie is mirrored into the jar for the API host.
+	snap := s.jar.snapshot()["127.0.0.1"]
 	if snap[accessCookieName] != "tok-1" {
 		t.Fatalf("access cookie missing in jar: %v", snap)
 	}
@@ -639,6 +655,18 @@ func TestPollerTick(t *testing.T) {
 	}
 	if !dish.Status.Alerts["motors_stuck"] {
 		t.Errorf("dish alerts missing motors_stuck: %v", dish.Status.Alerts)
+	}
+	if dish.Status.ObstructionFraction < 0.0039 || dish.Status.ObstructionFraction > 0.0041 {
+		t.Errorf("obstruction fraction = %v", dish.Status.ObstructionFraction)
+	}
+	if !dish.Status.CurrentlyObstructed {
+		t.Error("currently obstructed flag missing")
+	}
+	if dish.Status.ObstructionValidS != 86400 {
+		t.Errorf("obstruction validity = %v", dish.Status.ObstructionValidS)
+	}
+	if dish.Status.ObstructionLast24hS != 600 {
+		t.Errorf("obstruction last 24h = %v", dish.Status.ObstructionLast24hS)
 	}
 	samples := store.History(dish.ID, time.Hour)
 	if len(samples) != 3 {
