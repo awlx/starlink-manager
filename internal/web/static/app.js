@@ -23,6 +23,13 @@
     return d.innerHTML;
   }
 
+  function restoreSummary(summary) {
+    if (summary && summary.dataset.baseText != null) {
+      summary.textContent = summary.dataset.baseText;
+      delete summary.dataset.baseText;
+    }
+  }
+
   /* ---------- SVG line chart ---------- */
   function drawChart(svg, series, opts) {
     var ns = "http://www.w3.org/2000/svg";
@@ -30,6 +37,10 @@
     svg.onpointermove = svg.onpointerleave = svg.onkeydown = svg.onfocus = svg.onblur = null;
     var tooltip = svg.parentElement.querySelector(".chart-tooltip");
     if (tooltip) tooltip.hidden = true;
+    var summary = svg.parentElement.querySelector(".chart-summary");
+    // A redraw (resize, theme, new window) drops the cursor, so put back a
+    // summary that an inspected sample replaced.
+    restoreSummary(summary);
 
     var W = Math.max(240, svg.clientWidth || 480), H = 180, padL = 66, padB = 24, padT = 12, padR = 12;
     svg.setAttribute("viewBox", "0 0 " + W + " " + H);
@@ -95,10 +106,10 @@
 
     var cursor = node("g", { visibility: "hidden", "aria-hidden": "true" });
     var cross = node("line", { y1: padT, y2: H - padB, class: "crosshair" }, cursor);
-    var dot = node("circle", { r: 4, fill: opts.color, stroke: "var(--bg-card)", "stroke-width": 2 }, cursor);
+    var dot = node("circle", { r: 4, fill: opts.color, "stroke-width": 2 }, cursor);
+    // var() is not valid in SVG presentation attributes; use a style.
+    dot.style.stroke = "var(--bg-card)";
     var selected = series.length - 1;
-    var summary = svg.parentElement.querySelector(".chart-summary");
-    var summaryText;
     function show(index, announce) {
       selected = Math.max(0, Math.min(index, series.length - 1));
       var p = series[selected], px = x(p.t);
@@ -108,14 +119,14 @@
       var text = new Date(p.t * 1000).toLocaleString() + " · " + (opts.binary ? (p.v ? "Yes" : "No") : opts.valueFmt(p.v));
       if (tooltip) { tooltip.textContent = text; tooltip.hidden = false; }
       if (announce && summary) {
-        if (summaryText == null) summaryText = summary.textContent;
+        if (summary.dataset.baseText == null) summary.dataset.baseText = summary.textContent;
         summary.textContent = text;
       }
     }
     function hide() {
       cursor.setAttribute("visibility", "hidden");
       if (tooltip) tooltip.hidden = true;
-      if (summaryText != null && summary) { summary.textContent = summaryText; summaryText = null; }
+      restoreSummary(summary);
     }
     svg.onpointermove = function (ev) {
       var point = svg.createSVGPoint();
