@@ -1,0 +1,25 @@
+# Local development compose file — NOT for production deployment.
+# Production runs via ffmuc-salt-public with Komodo, Keycloak and Traefik.
+#
+#   cp .env.example .env   # fill in STARLINK_SSO_COOKIE
+#   docker compose -f docker-compose.local.yaml up --build
+#
+# The app is then on http://localhost:8080 with LOCAL_DEV_USER dev auth.
+
+services:
+  starlink-manager:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      # Dev override: every request is treated as an authenticated admin.
+      LOCAL_DEV_USER: "true"
+      AUTH_MODE: "localdev"
+    volumes:
+      - starlink-data:/data
+    restart: unless-stopped
+
+volumes:
+  starlink-data:
