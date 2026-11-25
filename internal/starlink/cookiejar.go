@@ -43,9 +43,6 @@ func (j *cookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	defer j.mu.Unlock()
 	host := strings.ToLower(u.Hostname())
 	for _, c := range cookies {
-		if c.Value == "" {
-			continue
-		}
 		domain := c.Domain
 		if domain == "" {
 			domain = host
@@ -62,12 +59,26 @@ func (j *cookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 			byHost = map[string]jarEntry{}
 			j.cookies[host] = byHost
 		}
+		// Handle deletion before the empty-value guard: server-expired
+		// cookies arrive as an empty value (with Max-Age <= 0 or a past
+		// Expires) and must clear the stored entry.
 		if c.MaxAge < 0 {
 			delete(byHost, c.Name)
 			continue
 		}
+		if c.Value == "" && c.Expires.Before(time.Now()) {
+			delete(byHost, c.Name)
+			continue
+		}
+		if c.Value == "" {
+			continue
+		}
 		expires := time.Time{}
-		if c.Expires.After(time.Time{}) {
+		switch {
+		case c.MaxAge > 0:
+			// Max-Age takes precedence over Expires (RFC 6265).
+			expires = time.Now().Add(time.Duration(c.MaxAge) * time.Second)
+		case c.Expires.After(time.Time{}):
 			expires = c.Expires
 		}
 		byHost[c.Name] = jarEntry{
