@@ -3,6 +3,7 @@ package starlink
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -98,7 +99,9 @@ func NewStore(dataDir string, window time.Duration, now func() time.Time) *Store
 	}
 }
 
-// Load reads persisted devices and history from disk, if present.
+// Load reads persisted devices and history from disk, if present. A
+// corrupt or unparsable file is renamed aside and the store starts empty
+// instead of failing startup.
 func (s *Store) Load() error {
 	data, err := os.ReadFile(s.logFile)
 	if err != nil {
@@ -111,7 +114,15 @@ func (s *Store) Load() error {
 		Devices []*Device `json:"devices"`
 	}
 	if err := json.Unmarshal(data, &snap); err != nil {
-		return fmt.Errorf("parsing %s: %w", s.logFile, err)
+		aside := fmt.Sprintf("%s.corrupt-%d", s.logFile, s.now().Unix())
+		if rerr := os.Rename(s.logFile, aside); rerr == nil {
+			s.logWarn("persisted store is corrupt; renamed aside and starting empty",
+				"file", s.logFile, "aside", aside, "err", err)
+		} else {
+			s.logWarn("persisted store is corrupt and could not be renamed aside; starting empty",
+				"file", s.logFile, "err", err)
+		}
+		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -127,34 +138,85 @@ func (s *Store) Load() error {
 			}
 		}
 		d.Samples = kept
+		if len(d.Samples) > persistedSampleCap {
+			d.Samples = append([]Sample(nil), d.Samples[len(d.Samples)-persistedSampleCap:]...)
+		}
 		s.devices[d.ID] = d
 	}
 	return nil
 }
 
-// Save writes the current state to disk atomically (tmp file + rename).
+// persistedSampleCap bounds the samples persisted per device. At 1 Hz the
+// 24 h window already produces ~86k samples per dish (~14 MB of JSON);
+// the cap prevents a misconfigured window from blowing up the store file.
+const persistedSampleCap = 90_000
+
+// Save writes the current state to disk atomically: the snapshot is taken
+// under the lock, but marshaling and writing happen outside it so page
+// handlers are never blocked by a multi-megabyte serialization. The write
+// goes to a temp file that is fsynced, renamed over the live file, and the
+// directory entry is fsynced before the dirty flag is cleared, so a crash
+// cannot leave an empty or truncated store.
 func (s *Store) Save() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := os.MkdirAll(s.dataDir, 0o755); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	devices := make([]*Device, 0, len(s.devices))
 	for _, d := range s.devices {
-		devices = append(devices, d)
+		cp := *d
+		// Deep-copy the sample slice: the poller appends concurrently.
+		cp.Samples = append([]Sample(nil), d.Samples...)
+		devices = append(devices, &cp)
 	}
-	payload, err := json.MarshalIndent(struct {
+	dirty := s.dirty
+	s.mu.Unlock()
+
+	payload, err := json.Marshal(struct {
 		Devices []*Device `json:"devices"`
-	}{Devices: devices}, "", "  ")
+	}{Devices: devices})
 	if err != nil {
 		return err
 	}
 	tmp := s.logFile + ".tmp"
-	if err := os.WriteFile(tmp, payload, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
 		return err
 	}
-	s.dirty = false
-	return os.Rename(tmp, s.logFile)
+	if _, err := f.Write(payload); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, s.logFile); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	// fsync the directory so the rename is durable before clearing dirty.
+	if dir, derr := os.Open(s.dataDir); derr == nil {
+		_ = dir.Sync()
+		dir.Close()
+	}
+	if dirty {
+		s.mu.Lock()
+		s.dirty = false
+		s.mu.Unlock()
+	}
+	return nil
+}
+
+func (s *Store) logWarn(msg string, args ...any) {
+	slog.Warn(msg, append([]any{"component", "store"}, args...)...)
 }
 
 // UpsertDevice registers or updates registry metadata for a device.
@@ -297,8 +359,31 @@ func (s *Store) AppendHistory(id string, hist *device.DishGetHistoryResponse) in
 		if trim > 1024 { // compact only when meaningful
 			d.Samples = append([]Sample(nil), d.Samples[trim:]...)
 		}
+		// Hard cap so a misconfigured window cannot blow up the store.
+		if len(d.Samples) > persistedSampleCap {
+			d.Samples = append([]Sample(nil), d.Samples[len(d.Samples)-persistedSampleCap:]...)
+		}
 	}
 	return added
+}
+
+// PruneDevices removes devices whose IDs are absent from the given live
+// set and reports the removed IDs. It is called after a successful roster
+// fetch so devices removed from the account stop being polled and
+// rendered instead of lingering as unreachable ghosts.
+func (s *Store) PruneDevices(live map[string]struct{}) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var removed []string
+	for id := range s.devices {
+		if _, ok := live[id]; ok {
+			continue
+		}
+		delete(s.devices, id)
+		removed = append(removed, id)
+		s.dirty = true
+	}
+	return removed
 }
 
 // SetStatus stores the latest gateway status snapshot for a device.
