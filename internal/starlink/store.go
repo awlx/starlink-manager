@@ -30,7 +30,7 @@ type DeviceStatus struct {
 	SoftwareVersion     string           `json:"softwareVersion,omitempty"`
 	State               string           `json:"state,omitempty"`
 	UptimeS             uint64           `json:"uptimeS,omitempty"`
-	SNR                 float64          `json:"snr,omitempty"`
+	SNR                 *float64         `json:"snr,omitempty"` // nil: firmware did not report it
 	PopPingLatencyMs    float64          `json:"popPingLatencyMs,omitempty"`
 	PopPingDropRate     float64          `json:"popPingDropRate,omitempty"`
 	DownlinkThroughput  float64          `json:"downlinkBps,omitempty"`

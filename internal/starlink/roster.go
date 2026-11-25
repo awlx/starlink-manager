@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -54,6 +55,21 @@ type Roster struct {
 	lines   []*ServiceLine
 	fetched time.Time
 	err     error
+
+	// lastErr is readable without r.mu, which is held across fetches.
+	lastErr atomic.Pointer[string]
+}
+
+// LastError returns the most recent roster refresh error, or "" once a
+// refresh has succeeded since.
+func (r *Roster) LastError() string {
+	if r == nil {
+		return ""
+	}
+	if p := r.lastErr.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // NewRoster creates a roster client.
@@ -79,6 +95,8 @@ func (r *Roster) Get(ctx context.Context) ([]*ServiceLine, error) {
 	}
 	lines, err := r.fetch(ctx)
 	if err != nil {
+		msg := err.Error()
+		r.lastErr.Store(&msg)
 		if r.lines != nil {
 			// Serve stale data rather than failing the whole tick.
 			r.log.Warn("roster refresh failed; serving cached roster", "err", err)
@@ -89,6 +107,7 @@ func (r *Roster) Get(ctx context.Context) ([]*ServiceLine, error) {
 	r.lines = lines
 	r.fetched = time.Now()
 	r.err = nil
+	r.lastErr.Store(nil)
 	return lines, nil
 }
 

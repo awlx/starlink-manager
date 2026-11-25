@@ -883,3 +883,36 @@ func TestGRPCWebDecodeRejectsBadFrames(t *testing.T) {
 		t.Fatalf("parseGRPCStatus = %d %q %v", code, msg, err)
 	}
 }
+
+func TestRosterLastError(t *testing.T) {
+	_, ts := newFakeAPI(t)
+	s := newTestSession(t, ts, &fakeClock{now: time.Now()})
+	r := NewRoster(s, ts.URL+"/missing", time.Minute, nil)
+	if _, err := r.Get(context.Background()); err == nil {
+		t.Fatal("expected roster error from a missing endpoint")
+	}
+	if r.LastError() == "" {
+		t.Fatal("LastError empty after a failed refresh")
+	}
+	r.apiBase = ts.URL
+	if _, err := r.Get(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.LastError(); got != "" {
+		t.Fatalf("LastError = %q after a successful refresh", got)
+	}
+}
+
+func TestStatusFromResponseUnreportedFields(t *testing.T) {
+	resp := &device.Response{Response: &device.Response_DishGetStatus{DishGetStatus: &device.DishGetStatusResponse{}}}
+	st := statusFromResponse(KindDish, resp)
+	if st.State != "" || st.SNR != nil {
+		t.Fatalf("unset state/snr mapped to %q / %v, want empty", st.State, st.SNR)
+	}
+	resp.GetDishGetStatus().State = device.DishState_CONNECTED.Enum()
+	resp.GetDishGetStatus().Snr = proto.Float32(9.5)
+	st = statusFromResponse(KindDish, resp)
+	if st.State != "CONNECTED" || st.SNR == nil || *st.SNR != 9.5 {
+		t.Fatalf("reported state/snr mapped to %q / %v", st.State, st.SNR)
+	}
+}

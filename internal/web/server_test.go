@@ -67,7 +67,7 @@ func seedDevice(t *testing.T, store *starlink.Store) *starlink.Device {
 			State:               "CONNECTED",
 			SoftwareVersion:     "2024.05.01",
 			HardwareVersion:     "rev3",
-			SNR:                 8.5,
+			SNR:                 proto.Float64(8.5),
 			PopPingLatencyMs:    42,
 			PopPingDropRate:     0.01,
 			DownlinkThroughput:  1.2e8,
@@ -483,6 +483,50 @@ func TestActionValidation(t *testing.T) {
 		body := readAll(t, resp)
 		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, `"error":`) {
 			t.Errorf("%s %s: status %d body %q, want a 400 JSON error", c.id, c.body, resp.StatusCode, body)
+		}
+	}
+}
+
+func TestDeviceViewUnreportedStateAndSNR(t *testing.T) {
+	srv, ts := newTestServer(t)
+	d := seedDevice(t, srv.store)
+	d.Status.State = ""
+	d.Status.SNR = nil
+	d.Status.Alerts = map[string]bool{"thermal_throttle": true, "motors_stuck": true, "obstructed": false}
+	srv.store.UpsertDevice(d)
+
+	v := srv.deviceView(d, time.Now())
+	if v.StateLabel != "not reported" || v.SNRText != "—" {
+		t.Errorf("state %q snr %q, want not reported / —", v.StateLabel, v.SNRText)
+	}
+	if strings.Join(v.Alerts, ",") != "motors stuck,thermal throttling" {
+		t.Errorf("alerts = %v, want sorted active alerts", v.Alerts)
+	}
+	resp, err := http.Get(ts.URL + "/device/" + d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body := readAll(t, resp); strings.Contains(body, ">0.0<") {
+		t.Error("device page shows SNR 0.0 for a dish that did not report SNR")
+	}
+}
+
+func TestSortedDevicesStable(t *testing.T) {
+	srv, _ := newTestServer(t)
+	for _, id := range []string{"utC", "Router-A", "utB", "utA"} {
+		kind := starlink.KindDish
+		if strings.HasPrefix(id, "Router") {
+			kind = starlink.KindRouter
+		}
+		srv.store.UpsertDevice(&starlink.Device{ID: id, Kind: kind, Name: "same"})
+	}
+	for i := 0; i < 20; i++ {
+		var ids []string
+		for _, d := range sortedDevices(srv.store) {
+			ids = append(ids, d.ID)
+		}
+		if got := strings.Join(ids, ","); got != "utA,utB,utC,Router-A" {
+			t.Fatalf("order = %s", got)
 		}
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -252,7 +253,10 @@ func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 
 	if st := d.Status; st != nil {
 		v.StateLabel = st.State
-		v.SNRText = fmt.Sprintf("%.1f", st.SNR)
+		if v.StateLabel == "" {
+			v.StateLabel = "not reported"
+		}
+		v.SNRText = snrText(st.SNR)
 		if st.ObstructionFraction > 0 || st.CurrentlyObstructed {
 			v.ObstructionText = fmt.Sprintf("%.1f%%", st.ObstructionFraction*100)
 			if st.CurrentlyObstructed {
@@ -264,11 +268,7 @@ func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 		v.ObstructionClass = obstructionClass(st)
 		v.ObstructionBarPct = obstructionBarPct(st.ObstructionFraction)
 		v.VersionsText = strings.TrimSpace(st.SoftwareVersion + " / " + st.HardwareVersion)
-		for name, active := range st.Alerts {
-			if active {
-				v.Alerts = append(v.Alerts, alertLabel(name))
-			}
-		}
+		v.Alerts = activeAlerts(st.Alerts)
 	}
 	if v.StateLabel == "" {
 		v.StateLabel = "unknown"
@@ -321,25 +321,26 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		devs = append(devs, s.deviceView(d, now))
 	}
 	data := dashboardData{
-		pageInfo: s.baseInfo(r),
-		Devices:  devs,
+		pageInfo:        s.baseInfo(r),
+		Devices:         devs,
+		LastRosterError: s.roster.LastError(),
 	}
 	s.render(w, "dashboard", data)
 }
 
 func sortedDevices(store *starlink.Store) []*starlink.Device {
 	devs := store.Devices()
-	// deterministic order: dishes before routers, then by name
-	for i := 1; i < len(devs); i++ {
-		for j := i; j > 0; j-- {
-			a, b := devs[j-1], devs[j]
-			if (a.Kind == starlink.KindDish && b.Kind == starlink.KindRouter) ||
-				(a.Kind == b.Kind && a.Name < b.Name) {
-				continue
-			}
-			devs[j-1], devs[j] = devs[j], devs[j-1]
+	// deterministic order: dishes before routers, then by name, then by ID
+	sort.Slice(devs, func(i, j int) bool {
+		a, b := devs[i], devs[j]
+		if a.Kind != b.Kind {
+			return a.Kind == starlink.KindDish
 		}
-	}
+		if a.Name != b.Name {
+			return a.Name < b.Name
+		}
+		return a.ID < b.ID
+	})
 	return devs
 }
 
@@ -448,7 +449,7 @@ func (s *Server) statusRows(d *starlink.Device) []statusRow {
 		add("State", "state", orDash(st.State))
 		add("Software version", "versions", orDash(st.SoftwareVersion))
 		add("Hardware version", "hw", orDash(st.HardwareVersion))
-		add("SNR", "snr", orDash(fmt.Sprintf("%.1f", st.SNR)))
+		add("SNR", "snr", snrText(st.SNR))
 		add("Ping latency", "ping", orDash(msText(st.PopPingLatencyMs)))
 		add("Ping drop rate", "drop", orDash(pctText(st.PopPingDropRate)))
 		add("Downlink", "down", orDash(bpsText(st.DownlinkThroughput)))
@@ -456,16 +457,10 @@ func (s *Server) statusRows(d *starlink.Device) []statusRow {
 		add("Currently obstructed", "obstructedNow", yesNo(st.CurrentlyObstructed))
 		add("Obstruction validity", "obstructionValid", orDash(secondsText(st.ObstructionValidS)))
 		add("Obstructed (last 24h)", "obstruction24h", orDash(secondsText(st.ObstructionLast24hS)))
-		add("Scheduled (last sample)", "scheduledFlag", yesNo(lastScheduled(d)))
+		add("Scheduled (last sample)", "scheduledFlag", yesNo(s.lastScheduled(d)))
 		add("Stow requested", "stow", yesNo(st.StowRequested))
 		add("Uptime", "uptime", orDash(durationText(st.UptimeS)))
-		if len(st.Alerts) > 0 {
-			var alerts []string
-			for name, active := range st.Alerts {
-				if active {
-					alerts = append(alerts, alertLabel(name))
-				}
-			}
+		if alerts := activeAlerts(st.Alerts); len(alerts) > 0 {
 			add("Alerts", "alerts", strings.Join(alerts, ", "))
 		}
 	}
@@ -494,12 +489,33 @@ func durationText(s uint64) string {
 }
 
 // lastScheduled reports whether the most recent history sample was taken
-// during a scheduled (boresight) maintenance window.
-func lastScheduled(d *starlink.Device) bool {
-	if len(d.Samples) == 0 {
+// during a scheduled (boresight) maintenance window. Device snapshots from
+// the store carry no samples, so read the history directly.
+func (s *Server) lastScheduled(d *starlink.Device) bool {
+	samples := s.store.History(d.ID, 15*time.Minute)
+	if len(samples) == 0 {
 		return false
 	}
-	return d.Samples[len(d.Samples)-1].Scheduled
+	return samples[len(samples)-1].Scheduled
+}
+
+func snrText(v *float64) string {
+	if v == nil {
+		return "—"
+	}
+	return fmt.Sprintf("%.1f", *v)
+}
+
+// activeAlerts returns the labels of the active alerts in a stable order.
+func activeAlerts(m map[string]bool) []string {
+	var out []string
+	for name, active := range m {
+		if active {
+			out = append(out, alertLabel(name))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 func obstructionText(st *starlink.DeviceStatus) string {
 	if st.ObstructionFraction <= 0 && !st.CurrentlyObstructed {

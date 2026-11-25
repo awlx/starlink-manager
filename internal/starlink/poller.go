@@ -309,13 +309,24 @@ func statusFromResponse(kind DeviceKind, resp *device.Response) *DeviceStatus {
 			alerts[name] = true
 		}
 	}
+	// Current dish firmware omits state and snr; keep them empty instead of
+	// reporting UNKNOWN / 0 dB for a dish that is actually connected.
+	var stateName string
+	if dish.State != nil {
+		stateName = dishStateName(dish.GetState())
+	}
+	var snr *float64
+	if dish.Snr != nil {
+		v := float64(dish.GetSnr())
+		snr = &v
+	}
 	return &DeviceStatus{
 		FetchedAt:           time.Now(),
 		HardwareVersion:     info.GetHardwareVersion(),
 		SoftwareVersion:     info.GetSoftwareVersion(),
-		State:               dishStateName(dish.GetState()),
+		State:               stateName,
 		UptimeS:             state.GetUptimeS(),
-		SNR:                 float64(dish.GetSnr()),
+		SNR:                 snr,
 		PopPingLatencyMs:    float64(dish.GetPopPingLatencyMs()),
 		PopPingDropRate:     float64(dish.GetPopPingDropRate()),
 		DownlinkThroughput:  float64(dish.GetDownlinkThroughputBps()),

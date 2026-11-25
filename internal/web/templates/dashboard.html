@@ -4,7 +4,7 @@
   <h1>Devices</h1>
   <p class="muted">
     {{len .Devices}} device(s) on account {{.AccountNumber}} ·
-    account state: <span class="pill {{if .SessionDead}}pill-error{{else}}pill-ok{{end}}">{{if .SessionDead}}session invalid{{else if .LastRosterError}}roster error{{else}}ok{{end}}</span>
+    account state: <span class="pill {{if or .SessionDead .LastRosterError}}pill-error{{else}}pill-ok{{end}}"{{if .LastRosterError}} title="{{.LastRosterError}}"{{end}}>{{if .SessionDead}}session invalid{{else if .LastRosterError}}roster error{{else}}ok{{end}}</span>
   </p>
 </div>
 
