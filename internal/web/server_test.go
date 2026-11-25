@@ -714,3 +714,34 @@ func TestTelemetryFallbacksInStatusRows(t *testing.T) {
 		}
 	}
 }
+
+func TestDeviceViewVersionsText(t *testing.T) {
+	srv, _ := newTestServer(t)
+	now := time.Now()
+	cases := []struct {
+		name, sw, hw, tele string
+		nilStatus          bool
+		want               string
+	}{
+		{name: "both", sw: "2025.01", hw: "rev4", want: "2025.01 / rev4"},
+		{name: "hw only uses telemetry sw", hw: "rev4", tele: "2025.cloud", want: "2025.cloud / rev4"},
+		{name: "hw only", hw: "rev4", want: "rev4"},
+		{name: "sw only", sw: "2025.01", want: "2025.01"},
+		{name: "none", want: "—"},
+		{name: "no status uses telemetry", nilStatus: true, tele: "2025.cloud", want: "2025.cloud"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &starlink.Device{ID: "ut1", Kind: starlink.KindDish}
+			if !tc.nilStatus {
+				d.Status = &starlink.DeviceStatus{SoftwareVersion: tc.sw, HardwareVersion: tc.hw}
+			}
+			if tc.tele != "" {
+				d.Telemetry = map[string]any{"softwareVersion": tc.tele}
+			}
+			if got := srv.deviceView(d, now).VersionsText; got != tc.want {
+				t.Fatalf("VersionsText = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

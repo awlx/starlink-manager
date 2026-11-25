@@ -297,14 +297,11 @@ func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 		}
 		v.ObstructionClass = obstructionClass(st)
 		v.ObstructionBarPct = obstructionBarPct(st.ObstructionFraction)
-		v.VersionsText = strings.TrimSpace(st.SoftwareVersion + " / " + st.HardwareVersion)
-		if v.VersionsText == "/" {
-			// The dish firmware sometimes omits the software version;
-			// fall back to the cloud telemetry enrichment.
-			if sv := telemetryString(d.Telemetry, "softwareVersion"); sv != "" {
-				v.VersionsText = sv
-			}
-		}
+		// The dish firmware sometimes omits the software version; fall
+		// back to the cloud telemetry enrichment.
+		v.VersionsText = versionsText(
+			firstNonEmpty(st.SoftwareVersion, telemetryString(d.Telemetry, "softwareVersion")),
+			st.HardwareVersion)
 		v.Alerts = activeAlerts(st.Alerts)
 		if d.Kind == starlink.KindRouter {
 			if st.Wifi != nil {
@@ -328,7 +325,7 @@ func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 		v.ObstructionText = "—"
 	}
 	if v.VersionsText == "" {
-		v.VersionsText = "—"
+		v.VersionsText = orDash(telemetryString(d.Telemetry, "softwareVersion"))
 	}
 	// Health is presentation-only; API reachability semantics stay unchanged.
 	v.HealthClass, v.HealthLabel = v.OnlineClass, v.OnlineLabel
@@ -553,6 +550,16 @@ func orDash(s string) string {
 		return "—"
 	}
 	return s
+}
+
+// versionsText joins software and hardware versions, leaving out the
+// separator when either is unknown.
+func versionsText(sw, hw string) string {
+	sw, hw = strings.TrimSpace(sw), strings.TrimSpace(hw)
+	if sw != "" && hw != "" {
+		return sw + " / " + hw
+	}
+	return sw + hw
 }
 
 func firstNonEmpty(vals ...string) string {
