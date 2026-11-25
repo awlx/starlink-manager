@@ -1,0 +1,24 @@
+# Local development files that may contain credentials - never commit
+.env
+.env.*
+!.env.example
+*.env
+
+# Runtime data (cached telemetry history)
+/data/
+
+# Build output
+/starlink-manager
+/bin/
+dist/
+
+# Go
+*.test
+*.out
+coverage.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
