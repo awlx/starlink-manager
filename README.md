@@ -82,6 +82,7 @@ clear message for invalid or missing values.
 | `STARLINK_API_BASE_URL` | `https://api.starlink.com` | Account API base URL |
 | `STARLINK_WEB_BASE_URL` | `https://starlink.com` | Web host used for session renewal and the device gateway |
 | `STARLINK_POLL_INTERVAL` | `30s` | Roster/status/telemetry polling cadence (min 2s; the cloud updates roughly every 2 min per device) |
+| `STARLINK_POLL_CONCURRENCY` | `4` | Devices polled in parallel per round (integer; values outside 1–16 are clamped). Each device keeps its own call deadline, so unreachable devices cannot stall the round |
 | `STARLINK_HISTORY_WINDOW` | `24h` | How much per-device history to keep locally |
 | `STARLINK_CALL_TIMEOUT` | `12s` | Timeout per device API call |
 | `STARLINK_DATA_DIR` | `data` | Directory for persisted history (`data/store.json`) |

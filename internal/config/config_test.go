@@ -212,3 +212,25 @@ func TestLoadLocalDevRequiresOptIn(t *testing.T) {
 		t.Fatalf("mixed-case AUTH_MODE with LOCAL_DEV_USER: cfg %q err %v", cfg.AuthMode, err)
 	}
 }
+
+func TestLoadPollConcurrency(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want int
+	}{{"", 4}, {"8", 8}, {"0", 1}, {"-3", 1}, {"64", 16}, {" 16 ", 16}} {
+		env := baseEnv()
+		env["STARLINK_POLL_CONCURRENCY"] = tc.raw
+		cfg, err := load(loader(env))
+		if err != nil {
+			t.Fatalf("%q: %v", tc.raw, err)
+		}
+		if cfg.PollConcurrency != tc.want {
+			t.Errorf("%q: PollConcurrency = %d, want %d", tc.raw, cfg.PollConcurrency, tc.want)
+		}
+	}
+	env := baseEnv()
+	env["STARLINK_POLL_CONCURRENCY"] = "four"
+	if _, err := load(loader(env)); err == nil {
+		t.Error("non-integer STARLINK_POLL_CONCURRENCY accepted")
+	}
+}

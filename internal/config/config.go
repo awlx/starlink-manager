@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -43,6 +44,7 @@ type Config struct {
 	PollInterval       time.Duration // roster/telemetry/status polling cadence
 	HistoryWindow      time.Duration // length of persisted per-device history
 	CallTimeout        time.Duration // per device-call timeout
+	PollConcurrency    int           // parallel device polls per round (1..16)
 	DataDir            string        // persisted history directory
 	RosterCacheTTL     time.Duration
 	TelemetryTTLOnline time.Duration // telemetry age before "offline" in UI
@@ -131,6 +133,11 @@ func load(getenv func(string) string) (Config, error) {
 	}
 	if cfg.CallTimeout < time.Second {
 		return cfg, errors.New("STARLINK_CALL_TIMEOUT must be at least 1s")
+	}
+
+	cfg.PollConcurrency, err = pollConcurrency(getenv("STARLINK_POLL_CONCURRENCY"))
+	if err != nil {
+		return cfg, fmt.Errorf("STARLINK_POLL_CONCURRENCY: %w", err)
 	}
 
 	cfg.DataDir = strings.TrimSpace(getenv("STARLINK_DATA_DIR"))
@@ -259,6 +266,27 @@ func duration(raw string, def time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid duration %q (use e.g. 30s, 5m, 2h)", raw)
 	}
 	return d, nil
+}
+
+// Poll concurrency bounds: values outside the range are clamped.
+const (
+	DefaultPollConcurrency = 4
+	MinPollConcurrency     = 1
+	MaxPollConcurrency     = 16
+)
+
+// pollConcurrency parses STARLINK_POLL_CONCURRENCY. Unset means the
+// default; a non-integer is an error; out-of-range integers are clamped.
+func pollConcurrency(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return DefaultPollConcurrency, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid integer %q", raw)
+	}
+	return min(max(n, MinPollConcurrency), MaxPollConcurrency), nil
 }
 
 // splitList parses a comma-separated list, trimming whitespace and dropping

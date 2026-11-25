@@ -69,6 +69,7 @@ func run() error {
 	}
 
 	poller := starlink.NewPoller(gateway, roster, telemetry, session, store, cfg.PollInterval, log)
+	poller.SetConcurrency(cfg.PollConcurrency)
 	poller.Start()
 	defer poller.Stop()
 
@@ -94,7 +95,7 @@ func run() error {
 	errCh := make(chan error, 1)
 	go func() {
 		log.Info("listening", "addr", cfg.ListenAddr, "auth_mode", cfg.AuthMode,
-			"poll_interval", cfg.PollInterval, "data_dir", cfg.DataDir)
+			"poll_interval", cfg.PollInterval, "poll_concurrency", cfg.PollConcurrency, "data_dir", cfg.DataDir)
 		errCh <- httpServer.ListenAndServe()
 	}()
 

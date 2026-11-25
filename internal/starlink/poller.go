@@ -36,6 +36,31 @@ type Poller struct {
 	// backoff grows when a tick fails (e.g. probe rate limit) and delays
 	// the next attempt instead of hammering the API.
 	backoff time.Duration
+
+	// concurrency bounds the parallel device polls of one round.
+	concurrency int
+	// fetch performs the network part of one device poll; tests replace it.
+	fetch func(ctx context.Context, d *Device) devicePoll
+}
+
+// devicePoll is the network result of polling one device. Workers only
+// produce these; the round goroutine applies them to the store, so the
+// store has a single writer per round and history dedupe stays ordered.
+type devicePoll struct {
+	dev       *Device
+	status    *DeviceStatus
+	statusErr error
+	hist      *device.DishGetHistoryResponse
+	histErr   error
+}
+
+// DefaultPollConcurrency is used when SetConcurrency is never called.
+const DefaultPollConcurrency = 4
+
+// SetConcurrency sets how many devices are polled in parallel (clamped to
+// 1..16). It must be called before Start.
+func (p *Poller) SetConcurrency(n int) {
+	p.concurrency = min(max(n, 1), 16)
 }
 
 // NewPoller wires the poller.
@@ -54,6 +79,8 @@ func NewPoller(gateway *Gateway, roster *Roster, telemetry *Telemetry, session *
 		log:       log,
 		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
+
+		concurrency: DefaultPollConcurrency,
 	}
 }
 
@@ -240,40 +267,89 @@ func (p *Poller) Tick() error {
 	}
 
 	// 3. Poll every device through the gateway: status + history.
-	for _, d := range p.store.Devices() {
-		if p.ctx.Err() != nil {
-			break
-		}
-		p.pollDevice(p.ctx, d)
-	}
+	p.pollDevices(p.store.Devices())
 	return nil
 }
 
-// pollDevice fetches status and history; each gateway call is bounded by the
-// gateway call timeout, the device as a whole by twice that (plus slack for
-// a token refresh).
-func (p *Poller) pollDevice(ctx context.Context, d *Device) {
-	devCtx, cancel := context.WithTimeout(ctx, 3*p.gateway.CallTimeout())
-	defer cancel()
-
-	resp, err := p.gateway.GetStatus(devCtx, d.Kind, d.ID)
-	if err != nil {
-		p.logDeviceError(d, err)
+// pollDevices polls the given devices with a bounded worker pool. Each
+// device keeps its own deadline, so unreachable devices only occupy one
+// worker for at most that budget and the round always completes. Results
+// are applied to the store by this goroutine alone, in arrival order.
+func (p *Poller) pollDevices(devs []*Device) {
+	if len(devs) == 0 {
 		return
 	}
-	st := statusFromResponse(d.Kind, resp)
-	if st != nil {
-		p.store.SetStatus(d.ID, st)
-		p.log.Debug("device status refreshed", "device", d.Name, "state", st.State)
+	fetch := p.fetch
+	if fetch == nil {
+		fetch = p.fetchDevice
 	}
-
-	if d.Kind == KindDish {
-		hist, err := p.gateway.GetHistory(devCtx, d.Kind, d.ID)
-		if err != nil {
-			p.logDeviceError(d, err)
-			return
+	workers := min(max(p.concurrency, 1), len(devs))
+	jobs := make(chan *Device)
+	results := make(chan devicePoll)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for d := range jobs {
+				results <- fetch(p.ctx, d)
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, d := range devs {
+			if p.ctx.Err() != nil {
+				return
+			}
+			jobs <- d
 		}
-		if n := p.store.AppendHistory(d.ID, hist); n > 0 {
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	for r := range results {
+		p.applyPoll(r)
+	}
+}
+
+// fetchDevice fetches status and history; each gateway call is bounded by
+// the gateway call timeout, the device as a whole by three times that
+// (slack for a token refresh).
+func (p *Poller) fetchDevice(ctx context.Context, d *Device) devicePoll {
+	devCtx, cancel := context.WithTimeout(ctx, 3*p.gateway.CallTimeout())
+	defer cancel()
+	r := devicePoll{dev: d}
+	resp, err := p.gateway.GetStatus(devCtx, d.Kind, d.ID)
+	if err != nil {
+		r.statusErr = err
+		return r
+	}
+	r.status = statusFromResponse(d.Kind, resp)
+	if d.Kind == KindDish {
+		r.hist, r.histErr = p.gateway.GetHistory(devCtx, d.Kind, d.ID)
+	}
+	return r
+}
+
+// applyPoll writes one device poll result to the store.
+func (p *Poller) applyPoll(r devicePoll) {
+	d := r.dev
+	if r.statusErr != nil {
+		p.logDeviceError(d, r.statusErr)
+		return
+	}
+	if r.status != nil {
+		p.store.SetStatus(d.ID, r.status)
+		p.log.Debug("device status refreshed", "device", d.Name, "state", r.status.State)
+	}
+	if r.histErr != nil {
+		p.logDeviceError(d, r.histErr)
+		return
+	}
+	if r.hist != nil {
+		if n := p.store.AppendHistory(d.ID, r.hist); n > 0 {
 			p.log.Debug("history appended", "device", d.Name, "samples", n)
 		}
 	}
