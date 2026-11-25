@@ -411,3 +411,78 @@ func TestOnlineUsesConfiguredTTL(t *testing.T) {
 		t.Fatalf("label = %q with a 10m TTL", v.OnlineLabel)
 	}
 }
+
+func TestAPIUnknownDeviceIsCleanJSON(t *testing.T) {
+	_, ts := newTestServer(t)
+	for _, req := range []struct{ method, path, body string }{
+		{"GET", "/api/device/nope/history", ""},
+		{"GET", "/api/device/nope/clients", ""},
+		{"POST", "/api/device/nope/action", `{"action":"reboot"}`},
+	} {
+		r, _ := http.NewRequest(req.method, ts.URL+req.path, strings.NewReader(req.body))
+		resp, err := http.DefaultClient.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := readAll(t, resp)
+		if resp.StatusCode != http.StatusNotFound || !strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json") {
+			t.Errorf("%s: status %d type %q", req.path, resp.StatusCode, resp.Header.Get("Content-Type"))
+		}
+		var e map[string]string
+		if err := json.Unmarshal([]byte(body), &e); err != nil || e["error"] != "unknown device" {
+			t.Errorf("%s: body %q is not a single JSON error", req.path, body)
+		}
+	}
+}
+
+func TestSameSiteOK(t *testing.T) {
+	cases := []struct {
+		name, origin, fetchSite string
+		want                    bool
+	}{
+		{"no origin", "", "", true},
+		{"same origin with port", "http://localhost:8090", "same-origin", true},
+		{"same origin case", "https://Starlink.FFMUC.net", "", true},
+		{"other host", "https://evil.example", "", false},
+		{"other port", "http://localhost:9999", "", false},
+		{"null origin", "null", "", false},
+		{"cross-site fetch metadata", "", "cross-site", false},
+	}
+	for _, c := range cases {
+		r := httptest.NewRequest("POST", "/api/device/x/action", nil)
+		r.Host = "localhost:8090"
+		if c.name == "same origin case" {
+			r.Host = "starlink.ffmuc.net"
+		}
+		if c.origin != "" {
+			r.Header.Set("Origin", c.origin)
+		}
+		if c.fetchSite != "" {
+			r.Header.Set("Sec-Fetch-Site", c.fetchSite)
+		}
+		if got := sameSiteOK(r); got != c.want {
+			t.Errorf("%s: sameSiteOK = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestActionValidation(t *testing.T) {
+	srv, ts := newTestServer(t)
+	seedDevice(t, srv.store)
+	srv.store.UpsertDevice(&starlink.Device{ID: "Router-1", Kind: starlink.KindRouter, Name: "r"})
+	for _, c := range []struct{ id, body string }{
+		{"Router-1", `{"action":"stow"}`},
+		{"Router-1", `{"action":"inhibit_rf"}`},
+		{"ut1234", `{"action":"power_save","enable":true,"startMinutes":1440,"durationMinutes":60}`},
+		{"ut1234", `{"action":"power_save","enable":true,"startMinutes":60,"durationMinutes":0}`},
+	} {
+		resp, err := http.Post(ts.URL+"/api/device/"+c.id+"/action", "application/json", strings.NewReader(c.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := readAll(t, resp)
+		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, `"error":`) {
+			t.Errorf("%s %s: status %d body %q, want a 400 JSON error", c.id, c.body, resp.StatusCode, body)
+		}
+	}
+}

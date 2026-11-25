@@ -10,8 +10,8 @@ import (
 	"html/template"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -377,6 +377,18 @@ func (s *Server) deviceOr404(w http.ResponseWriter, r *http.Request) (*starlink.
 	return d, true
 }
 
+// deviceForAPI looks up the {id} device for JSON endpoints and answers a
+// JSON 404 itself; deviceOr404 renders an HTML page and must not be mixed
+// with writeJSON.
+func (s *Server) deviceForAPI(w http.ResponseWriter, r *http.Request) (*starlink.Device, bool) {
+	d, ok := s.store.Device(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, apiError{"unknown device"})
+		return nil, false
+	}
+	return d, true
+}
+
 func (s *Server) renderError(w http.ResponseWriter, r *http.Request, code int, title, msg string) {
 	w.WriteHeader(code)
 	s.render(w, "error", errorData{
@@ -548,7 +560,9 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-type apiError struct{ Error string }
+type apiError struct {
+	Error string `json:"error"`
+}
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -598,9 +612,8 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
-	d, ok := s.deviceOr404(w, r)
+	d, ok := s.deviceForAPI(w, r)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, apiError{"unknown device"})
 		return
 	}
 	window := s.cfg.HistoryWindow
@@ -660,9 +673,8 @@ type apiClient struct {
 }
 
 func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
-	d, ok := s.deviceOr404(w, r)
+	d, ok := s.deviceForAPI(w, r)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, apiError{"unknown device"})
 		return
 	}
 	if d.Kind != starlink.KindRouter {
@@ -707,22 +719,25 @@ type actionRequest struct {
 }
 
 var sameSiteOK = func(r *http.Request) bool {
-	// Basic CSRF defence: browsers always send Origin on cross-site POSTs.
+	// Basic CSRF defence: browsers send Origin (and Sec-Fetch-Site) on
+	// cross-site POSTs; non-browser clients send neither.
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return false
+	}
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		return true // same-origin fetch or non-browser client
+		return true // same-origin fetch from an older browser or a CLI client
 	}
-	h, _, err := net.SplitHostPort(origin)
-	if err != nil {
-		h = origin
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false // includes the opaque "null" origin
 	}
-	h = strings.TrimPrefix(h, "https://")
-	h = strings.TrimPrefix(h, "http://")
-	reqHost := r.Host
-	if hh, _, err := net.SplitHostPort(reqHost); err == nil {
-		reqHost = hh
-	}
-	return strings.EqualFold(h, reqHost)
+	return strings.EqualFold(u.Host, r.Host)
+}
+
+// dishOnlyActions may not be sent to routers.
+var dishOnlyActions = map[string]bool{
+	"stow": true, "unstow": true, "inhibit_rf": true, "allow_rf": true, "power_save": true,
 }
 
 func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
@@ -730,15 +745,24 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, apiError{"cross-site request rejected"})
 		return
 	}
-	d, ok := s.deviceOr404(w, r)
+	d, ok := s.deviceForAPI(w, r)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, apiError{"unknown device"})
 		return
 	}
 	var req actionRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, apiError{"invalid body"})
 		return
+	}
+	if d.Kind == starlink.KindRouter && dishOnlyActions[req.Action] {
+		writeJSON(w, http.StatusBadRequest, apiError{"action " + req.Action + " is not supported on routers"})
+		return
+	}
+	if req.Action == "power_save" && req.Enable {
+		if req.StartMinutes >= 24*60 || req.DurationMinutes == 0 || req.DurationMinutes > 24*60 {
+			writeJSON(w, http.StatusBadRequest, apiError{"power save needs startMinutes 0-1439 and durationMinutes 1-1440"})
+			return
+		}
 	}
 
 	ctx := r.Context()
