@@ -21,6 +21,7 @@ type Poller struct {
 	session   *Session
 	store     *Store
 	interval  time.Duration
+	saveEvery time.Duration
 	log       *slog.Logger
 
 	stop     chan struct{}
@@ -40,6 +41,7 @@ func NewPoller(gateway *Gateway, roster *Roster, telemetry *Telemetry, session *
 		session:   session,
 		store:     store,
 		interval:  interval,
+		saveEvery: time.Minute,
 		log:       log,
 		stop:      make(chan struct{}),
 	}
@@ -59,45 +61,51 @@ func (p *Poller) Stop() {
 const maxPollBackoff = 2 * time.Minute
 
 func (p *Poller) run() {
-	tick := time.NewTicker(p.interval)
-	defer tick.Stop()
-	save := time.NewTicker(time.Minute)
+	save := time.NewTicker(p.saveEvery)
 	defer save.Stop()
 
 	// Probe the session once before the first tick so the very first
 	// round already has a token and does not race the probe throttle.
-	p.initialProbe()
-
-	// First tick immediately so the UI has data right away.
-	p.tickRound()
+	// When it fails, the first round waits for the backoff instead of
+	// immediately running into the probe rate limit.
+	if p.initialProbe() {
+		// First tick immediately so the UI has data right away.
+		p.tickRound()
+	}
+	// The next tick deadline is a single timer that survives store saves:
+	// re-arming it on every loop iteration would let the save ticker
+	// starve polling whenever interval+backoff exceeds the save period.
+	next := time.NewTimer(p.interval + p.backoff)
+	defer next.Stop()
 	for {
-		delay := p.interval + p.backoff
 		select {
 		case <-p.stop:
 			if err := p.store.Save(); err != nil {
 				p.log.Warn("saving store on shutdown", "err", err)
 			}
 			return
-		case <-time.After(delay):
 		case <-save.C:
 			if err := p.store.Save(); err != nil {
 				p.log.Warn("saving store", "err", err)
 			}
-			continue
+		case <-next.C:
+			p.tickRound()
+			next.Reset(p.interval + p.backoff)
 		}
-		p.tickRound()
 	}
 }
 
 // initialProbe performs one bounded session probe at startup. Failure is
 // non-fatal: later ticks retry with backoff.
-func (p *Poller) initialProbe() {
+func (p *Poller) initialProbe() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if err := p.session.Ensure(ctx); err != nil {
 		p.log.Warn("initial session probe failed; will retry on next tick", "err", err)
 		p.backoff = p.interval
+		return false
 	}
+	return true
 }
 
 // tickRound runs one poll tick and adjusts the retry backoff.

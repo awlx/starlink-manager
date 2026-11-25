@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -677,6 +678,34 @@ func TestPollerTick(t *testing.T) {
 	}
 	if f.probeCount == 0 {
 		t.Error("session was never probed")
+	}
+}
+
+// TestPollerKeepsTickingAcrossSaves guards against the save ticker starving
+// the poll deadline when the poll interval is longer than the save period.
+func TestPollerKeepsTickingAcrossSaves(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	clock := &fakeClock{now: time.Now()}
+	s := newTestSession(t, ts, clock)
+	store := NewStore(t.TempDir(), 24*time.Hour, clock.Now)
+	var statusCalls atomic.Int32
+	f.handleFn = func(req *device.Request) (*device.Response, int32, string) {
+		if req.GetGetStatus() != nil && strings.HasPrefix(req.GetTargetId(), "ut") {
+			statusCalls.Add(1)
+		}
+		return f.defaultHandle(req)
+	}
+	p := NewPoller(NewGateway(s, ts.URL, ts.Client(), nil), NewRoster(s, ts.URL, time.Minute, nil),
+		NewTelemetry(s, ts.URL, nil), s, store, 40*time.Millisecond, testLogger(t))
+	p.saveEvery = 5 * time.Millisecond
+	p.Start()
+	defer p.Stop()
+	deadline := time.Now().Add(3 * time.Second)
+	for statusCalls.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := statusCalls.Load(); n < 3 {
+		t.Fatalf("poller ran %d rounds, want at least 3", n)
 	}
 }
 
