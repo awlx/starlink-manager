@@ -25,6 +25,9 @@ type Poller struct {
 	saveEvery time.Duration
 	log       *slog.Logger
 
+	// Metrics receives poller observations for the Prometheus endpoint.
+	metrics MetricsSink
+
 	stop     chan struct{}
 	stopOnce sync.Once
 	done     chan struct{} // closed when run returns (after the final save)
@@ -41,6 +44,27 @@ type Poller struct {
 	concurrency int
 	// fetch performs the network part of one device poll; tests replace it.
 	fetch func(ctx context.Context, d *Device) devicePoll
+}
+
+// MetricsSink receives operational metrics from the poller. It is optional
+// (nil disables metric collection, e.g. in tests).
+type MetricsSink interface {
+	SetGauge(name, labels string, value float64)
+	SetDeviceGauge(name string, id, label string, value float64)
+	IncCounter(name, labels string)
+	ObserveHistogram(name string, v float64)
+}
+
+// SetMetrics attaches an optional metrics sink. Passing nil disables it.
+func (p *Poller) SetMetrics(m MetricsSink) {
+	p.metrics = m
+}
+
+// observeRound records one poll round's duration (seconds).
+func (p *Poller) observeRound(d time.Duration) {
+	if p.metrics != nil {
+		p.metrics.ObserveHistogram("starlink_poll_round_duration_seconds", d.Seconds())
+	}
 }
 
 // devicePoll is the network result of polling one device. Workers only
@@ -182,8 +206,13 @@ func (p *Poller) Tick() error {
 	// starve the rest of the round.
 	ctx, cancel := context.WithTimeout(p.ctx, max(p.interval*2, 4*p.gateway.CallTimeout()))
 	defer cancel()
+	start := time.Now()
+	defer func() { p.observeRound(time.Since(start)) }()
 
 	if p.session.SessionDead() {
+		if p.metrics != nil {
+			p.metrics.SetGauge("starlink_session_dead", "", 1)
+		}
 		if !p.session.RecoveryDue() {
 			p.log.Warn("starlink session dead; skipping poll (recovery probe scheduled; update STARLINK_SSO_COOKIE if the cookie expired)")
 			return nil
@@ -196,6 +225,9 @@ func (p *Poller) Tick() error {
 	if err != nil {
 		// Transient (probe rate limit, network, API hiccup): keep any data
 		// already collected and let the caller retry with backoff.
+		if p.metrics != nil {
+			p.metrics.IncCounter("starlink_poll_errors_total", "")
+		}
 		return fmt.Errorf("roster unavailable: %w", err)
 	} else {
 		live := map[string]struct{}{}
@@ -347,11 +379,22 @@ func (p *Poller) applyPoll(r devicePoll) {
 	d := r.dev
 	if r.statusErr != nil {
 		p.logDeviceError(d, r.statusErr)
+		if p.metrics != nil {
+			p.metrics.SetDeviceGauge("starlink_device_up", d.ID, d.Name, 0)
+		}
 		return
 	}
 	if r.status != nil {
 		p.store.SetStatus(d.ID, r.status)
 		p.log.Debug("device status refreshed", "device", d.Name, "state", r.status.State)
+		if p.metrics != nil {
+			p.metrics.SetDeviceGauge("starlink_device_up", d.ID, d.Name, 1)
+			p.metrics.SetDeviceGauge("starlink_device_pop_ping_drop_rate", d.ID, d.Name, r.status.PopPingDropRate)
+			p.metrics.SetDeviceGauge("starlink_device_pop_ping_latency_ms", d.ID, d.Name, r.status.PopPingLatencyMs)
+			p.metrics.SetDeviceGauge("starlink_device_downlink_bps", d.ID, d.Name, r.status.DownlinkThroughput)
+			p.metrics.SetDeviceGauge("starlink_device_uplink_bps", d.ID, d.Name, r.status.UplinkThroughput)
+			p.metrics.SetDeviceGauge("starlink_device_obstruction_fraction", d.ID, d.Name, r.status.ObstructionFraction)
+		}
 	}
 	if r.histErr != nil {
 		p.logDeviceError(d, r.histErr)

@@ -428,7 +428,15 @@ func (s *Store) PruneDevices(live map[string]struct{}) []string {
 	return removed
 }
 
-// SetStatus stores the latest gateway status snapshot for a device.
+// FileSize returns the byte size of the persisted store file (0 if absent).
+func (s *Store) FileSize() int64 {
+	fi, err := os.Stat(s.logFile)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
 func (s *Store) SetStatus(id string, st *DeviceStatus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

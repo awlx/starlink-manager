@@ -36,6 +36,44 @@ type Server struct {
 	store   *starlink.Store
 	session *starlink.Session
 	pages   map[string]*template.Template
+	metrics MetricsSink
+}
+
+// MetricsSink collects operational metrics (satisfied by metrics.Registry).
+type MetricsSink interface {
+	SetGauge(name, labels string, value float64)
+	IncCounter(name, labels string)
+}
+
+// SetMetrics attaches the metrics registry; passing nil disables updates.
+func (s *Server) SetMetrics(m MetricsSink) {
+	s.metrics = m
+}
+
+// updateMetrics refreshes the fleet-level gauges after a summary render.
+func (s *Server) updateMetrics() {
+	if s.metrics == nil {
+		return
+	}
+	now := time.Now()
+	total, online := 0, 0
+	for _, d := range sortedDevices(s.store) {
+		total++
+		if s.isOnline(d, now) {
+			online++
+		}
+	}
+	s.metrics.SetGauge("starlink_devices_total", "", float64(total))
+	s.metrics.SetGauge("starlink_devices_online", "", float64(online))
+	s.metrics.SetGauge("starlink_session_dead", "", boolGauge(s.sessionDead()))
+	s.metrics.SetGauge("starlink_store_size_bytes", "", float64(s.store.FileSize()))
+}
+
+func boolGauge(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // New builds the web server and parses all templates eagerly so template
@@ -798,6 +836,7 @@ type summaryDevice struct {
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
+	s.updateMetrics()
 	now := time.Now()
 	devs := []summaryDevice{}
 	for _, d := range sortedDevices(s.store) {

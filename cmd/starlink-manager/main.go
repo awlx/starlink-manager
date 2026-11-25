@@ -19,6 +19,7 @@ import (
 
 	"github.com/awlx/starlink-manager/internal/auth"
 	"github.com/awlx/starlink-manager/internal/config"
+	"github.com/awlx/starlink-manager/internal/metrics"
 	"github.com/awlx/starlink-manager/internal/starlink"
 	"github.com/awlx/starlink-manager/internal/web"
 )
@@ -81,6 +82,24 @@ func run() error {
 	srv, err := web.New(&cfg, authN, gateway, roster, store, session)
 	if err != nil {
 		return fmt.Errorf("web setup: %w", err)
+	}
+
+	// Metrics: a separate listener so the exposition is not behind the
+	// web app authentication. Bind it to loopback/nebula in production.
+	var metricsSrv *http.Server
+	if cfg.MetricsListenAddr != "" && cfg.MetricsListenAddr != "disabled" {
+		reg := metrics.New(log)
+		poller.SetMetrics(reg)
+		srv.SetMetrics(reg)
+		metricsSrv, err = metrics.Serve(reg, cfg.MetricsListenAddr, log)
+		if err != nil {
+			return fmt.Errorf("metrics server: %w", err)
+		}
+		defer func() {
+			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = metricsSrv.Shutdown(shutCtx)
+		}()
 	}
 
 	httpServer := &http.Server{

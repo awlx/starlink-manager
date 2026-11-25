@@ -48,6 +48,7 @@ type Config struct {
 	DataDir            string        // persisted history directory
 	RosterCacheTTL     time.Duration
 	TelemetryTTLOnline time.Duration // telemetry age before "offline" in UI
+	MetricsListenAddr  string        // Prometheus endpoint listener (default :9101)
 
 	AuthMode           AuthMode
 	OIDCIssuerURL      string
@@ -152,6 +153,11 @@ func load(getenv func(string) string) (Config, error) {
 	cfg.TelemetryTTLOnline, err = duration(getenv("STARLINK_TELEMETRY_ONLINE_TTL"), 5*time.Minute)
 	if err != nil {
 		return cfg, fmt.Errorf("STARLINK_TELEMETRY_ONLINE_TTL: %w", err)
+	}
+
+	cfg.MetricsListenAddr = strings.TrimSpace(getenv("METRICS_LISTEN_ADDR"))
+	if cfg.MetricsListenAddr == "" {
+		cfg.MetricsListenAddr = ":9101"
 	}
 
 	// Auth mode.
