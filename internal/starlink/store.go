@@ -327,12 +327,24 @@ func (s *Store) AppendHistory(id string, hist *device.DishGetHistoryResponse) in
 	if len(d.Samples) > 0 {
 		lastTs = d.Samples[len(d.Samples)-1].Ts
 	}
+	// Wall-clock steps (NTP corrections, host suspend/resume) skew derived
+	// timestamps. If the newest derived timestamp (the fetch time) would not
+	// land clearly past what is already stored, re-anchor to the current
+	// observed time so the series self-heals instead of dropping every later
+	// sample forever.
+	anchor := fetched
+	if len(d.Samples) > 0 && !fetched.After(lastTs.Add(2 * sampleInterval())) {
+		anchor = s.now().Truncate(time.Second)
+	}
 	var added int
 	for k := first; k < current; k++ {
-		ts := fetched.Add(-time.Duration(current-1-k) * time.Second)
+		ts := anchor.Add(-time.Duration(current-1-k) * time.Second)
 		// Polls derive timestamps from their own fetch time; skip seconds
 		// already stored so jitter or a reboot cannot duplicate samples.
 		if !ts.After(lastTs) {
+			continue
+		}
+		if ts.After(anchor.Add(2 * sampleInterval())) { // discard future-stamped samples (clock steps)
 			continue
 		}
 		i := int(k % n)
@@ -413,8 +425,29 @@ func (s *Store) SetTelemetry(id string, tm map[string]any) {
 	if !ok {
 		return
 	}
-	d.Telemetry = tm
+	// Sanitize floats: NaN/Inf break json.Marshal, which would make every
+	// save fail until restart.
+	d.Telemetry = sanitizeTelemetry(tm)
 	s.dirty = true
+}
+
+// sanitizeTelemetry replaces NaN/±Inf float values with 0 and drops nils.
+func sanitizeTelemetry(tm map[string]any) map[string]any {
+	out := make(map[string]any, len(tm))
+	for k, v := range tm {
+		switch val := v.(type) {
+		case float64:
+			if math.IsNaN(val) || math.IsInf(val, 0) {
+				val = 0
+			}
+			out[k] = val
+		case nil:
+			// drop
+		default:
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // History returns samples for a device within the given window ending now.
@@ -468,3 +501,6 @@ func bAt(arr []bool, i int) bool {
 	}
 	return false
 }
+
+// sampleInterval is the 1 Hz cadence of dish history samples.
+func sampleInterval() time.Duration { return time.Second }

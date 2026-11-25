@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -256,17 +257,29 @@ func mapFloat(m map[string]any, keys ...string) float64 {
 	}
 	switch val := v.(type) {
 	case float64:
-		return val
+		return finite64(val)
 	case int64:
 		return float64(val)
 	case int:
 		return float64(val)
 	case string:
-		f, _ := strconv.ParseFloat(val, 64)
-		return f
+		f, err := strconv.ParseFloat(val, 64)
+		if err != nil {
+			return 0
+		}
+		return finite64(f)
 	default:
 		return 0
 	}
+}
+
+// finite64 returns v unless it is NaN or ±Inf (which json.Marshal rejects
+// and which would make every store save fail); those become 0.
+func finite64(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
+	return v
 }
 
 func mapTime(m map[string]any, keys ...string) time.Time {

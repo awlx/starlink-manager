@@ -1,6 +1,8 @@
 package starlink
 
 import (
+	"encoding/json"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -130,6 +132,37 @@ func TestStoreSaveRoundTrip(t *testing.T) {
 	_ = d
 }
 
+func TestStoreTelemetryNaNDoesNotBrickPersistence(t *testing.T) {
+	store := NewStore(t.TempDir(), 24*time.Hour, nil)
+	store.UpsertDevice(&Device{ID: "ut1", Kind: KindDish, Name: "a", Active: true})
+	store.SetTelemetry("ut1", map[string]any{
+		"signalQuality":          math.NaN(),
+		"downlinkThroughputMbps": math.Inf(1),
+		"uptimeSeconds":          float64(42),
+	})
+	for i := 0; i < 3; i++ {
+		if err := store.Save(); err != nil {
+			t.Fatalf("save %d failed: %v", i, err)
+		}
+	}
+	var snap struct {
+		Devices []*Device `json:"devices"`
+	}
+	data, err := os.ReadFile(filepath.Join(store.dataDir, "store.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("persisted JSON unparsable: %v", err)
+	}
+	if snap.Devices[0].Telemetry["uptimeSeconds"].(float64) != 42 {
+		t.Fatal("clean telemetry value lost")
+	}
+	if v := snap.Devices[0].Telemetry["signalQuality"].(float64); math.IsNaN(v) || v != 0 {
+		t.Fatalf("NaN not sanitized: %v", v)
+	}
+}
+
 func TestCookieJarMaxAge(t *testing.T) {
 	jar := newCookieJar()
 	u := &url.URL{Scheme: "https", Host: "api.example.test", Path: "/"}
@@ -193,5 +226,63 @@ func TestTelemetryUnknownAlertCodeKept(t *testing.T) {
 	}
 	if len(tms) != 1 || tms[0].ActiveAlerts[0] != "999" {
 		t.Fatalf("unknown code mangled: %v", tms[0].ActiveAlerts)
+	}
+}
+
+func TestAppendHistoryClockStepReanchors(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)}
+	st := NewStore(t.TempDir(), 24*time.Hour, clock.Now)
+	now := clock.now
+	st.UpsertDevice(&Device{ID: "u1", Kind: KindDish, Name: "dish", Active: true})
+
+	// First poll: 3 samples ending at "now".
+	hist := func(current uint64, n int) *device.DishGetHistoryResponse {
+		lat := make([]float32, n)
+		for i := range lat {
+			lat[i] = 20
+		}
+		return &device.DishGetHistoryResponse{Current: proto.Uint64(current), PopPingLatencyMs: lat}
+	}
+	added1 := st.AppendHistory("u1", hist(1, 3))
+	if added1 != 1 {
+		t.Fatalf("first poll added %d samples, want 1", added1)
+	}
+	samples := st.History("u1", 24*time.Hour)
+	last := samples[len(samples)-1].Ts
+	if !last.Equal(now.Truncate(time.Second)) {
+		t.Fatalf("first poll anchored at %v, want %v", last, now.Truncate(time.Second))
+	}
+
+	// Clock jumps 30 minutes forward before the next poll; derived
+	// timestamps would overlap the past. The store must re-anchor and
+	// keep appending instead of dropping samples.
+	clock.Advance(30 * time.Minute)
+	now = clock.now
+	before := len(samples)
+	added := st.AppendHistory("u1", hist(4, 5))
+	if added == 0 {
+		t.Fatal("clock step froze history: no samples appended")
+	}
+	samples = st.History("u1", 24*time.Hour)
+	if len(samples) != before+added {
+		t.Fatalf("sample count %d, want %d", len(samples), before+added)
+	}
+	// Newest sample must be near the stepped clock, not stuck at old anchor.
+	newest := samples[len(samples)-1].Ts
+	if diff := newest.Sub(now.Truncate(time.Second)); diff > 2*time.Second {
+		t.Fatalf("newest sample %v is %v behind stepped clock", newest, diff)
+	}
+
+	// Reverse direction: clock steps backwards; samples stamped in the
+	// future must be discarded, not persisted.
+	clock.Advance(-15 * time.Minute)
+	now = clock.now
+	added3 := st.AppendHistory("u1", hist(6, 7))
+	if added3 != 0 {
+		t.Fatalf("third poll after backward step added %d samples, want 0", added3)
+	}
+	samples = st.History("u1", 24*time.Hour)
+	if len(samples) != 4 {
+		t.Fatalf("history len %d, want 4 (only the earlier polls)", len(samples))
 	}
 }
