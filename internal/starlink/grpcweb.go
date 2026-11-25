@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 )
 
@@ -59,6 +60,11 @@ func decodeGRPCWeb(body []byte) (data [][]byte, trailers map[string]string, err 
 		}
 		flags := head[0]
 		length := binary.BigEndian.Uint32(head[1:5])
+		// Validate against the bytes actually present before allocating:
+		// a corrupt length prefix must not trigger a multi-GB allocation.
+		if int64(length) > int64(r.Len()) {
+			return nil, nil, fmt.Errorf("truncated grpc-web frame body: header says %d bytes, %d remain", length, r.Len())
+		}
 		payload := make([]byte, length)
 		if _, err := io.ReadFull(r, payload); err != nil {
 			return nil, nil, fmt.Errorf("truncated grpc-web frame body (%d bytes): %w", length, err)
@@ -83,7 +89,9 @@ func mergeTrailers(dst map[string]string, raw string) {
 		if !ok {
 			continue
 		}
-		dst[strings.TrimSpace(string(key))] = strings.TrimSpace(string(val))
+		// Trailer names are case-insensitive (HTTP/2 lowercases them, but
+		// proxies may not); normalize so lookups by "grpc-status" work.
+		dst[strings.ToLower(strings.TrimSpace(string(key)))] = strings.TrimSpace(string(val))
 	}
 }
 
@@ -103,13 +111,16 @@ func parseGRPCStatus(trailers map[string]string) (int32, string, error) {
 }
 
 func parseSmallInt(raw string) (int32, error) {
+	if raw == "" {
+		return 0, errors.New("empty number")
+	}
 	var v int64
 	for _, c := range raw {
 		if c < '0' || c > '9' {
 			return 0, fmt.Errorf("not a number: %q", raw)
 		}
 		v = v*10 + int64(c-'0')
-		if v > 1<<31 {
+		if v > math.MaxInt32 {
 			return 0, fmt.Errorf("grpc-status too large: %q", raw)
 		}
 	}

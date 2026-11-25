@@ -793,4 +793,26 @@ func TestGRPCWebFraming(t *testing.T) {
 	if _, _, err := parseGRPCStatus(map[string]string{}); err == nil {
 		t.Fatal("missing grpc-status should error")
 	}
+	if _, _, err := parseGRPCStatus(map[string]string{"grpc-status": ""}); err == nil {
+		t.Fatal("empty grpc-status must not read as success")
+	}
+}
+
+func TestGRPCWebDecodeRejectsBadFrames(t *testing.T) {
+	// A length prefix far beyond the body must fail without allocating it.
+	huge := []byte{0, 0xff, 0xff, 0xff, 0xff, 1, 2}
+	if _, _, err := decodeGRPCWeb(huge); err == nil {
+		t.Fatal("oversized frame length should error")
+	}
+	// Mixed-case trailer names are normalized.
+	tr := "Grpc-Status: 16\r\nGrpc-Message: unauthenticated\r\n"
+	frame := append([]byte{frameFlagTrailers, 0, 0, 0, byte(len(tr))}, tr...)
+	_, trailers, err := decodeGRPCWeb(frame)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	code, msg, err := parseGRPCStatus(trailers)
+	if err != nil || code != 16 || msg != "unauthenticated" {
+		t.Fatalf("parseGRPCStatus = %d %q %v", code, msg, err)
+	}
 }
