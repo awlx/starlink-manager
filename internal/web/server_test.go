@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -95,6 +96,24 @@ func TestHealthzIsUnauthenticated(t *testing.T) {
 	}
 	if body["status"] != "ok" {
 		t.Fatalf("healthz body = %v", body)
+	}
+}
+
+func TestStaticAssetsServed(t *testing.T) {
+	_, ts := newTestServer(t)
+	for _, asset := range []string{"/static/style.css", "/static/app.js"} {
+		resp, err := http.Get(ts.URL + asset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("%s status = %d, want 200", asset, resp.StatusCode)
+		}
+		if len(body) == 0 {
+			t.Errorf("%s served empty body", asset)
+		}
 	}
 }
 

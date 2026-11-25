@@ -2,6 +2,7 @@ package starlink
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -24,6 +25,10 @@ type Poller struct {
 
 	stop     chan struct{}
 	stopOnce sync.Once
+
+	// backoff grows when a tick fails (e.g. probe rate limit) and delays
+	// the next attempt instead of hammering the API.
+	backoff time.Duration
 }
 
 // NewPoller wires the poller.
@@ -50,45 +55,86 @@ func (p *Poller) Stop() {
 	p.stopOnce.Do(func() { close(p.stop) })
 }
 
+// maxPollBackoff caps the retry backoff after failed ticks.
+const maxPollBackoff = 2 * time.Minute
+
 func (p *Poller) run() {
 	tick := time.NewTicker(p.interval)
 	defer tick.Stop()
 	save := time.NewTicker(time.Minute)
 	defer save.Stop()
 
+	// Probe the session once before the first tick so the very first
+	// round already has a token and does not race the probe throttle.
+	p.initialProbe()
+
 	// First tick immediately so the UI has data right away.
-	p.Tick()
+	p.tickRound()
 	for {
+		delay := p.interval + p.backoff
 		select {
 		case <-p.stop:
 			if err := p.store.Save(); err != nil {
 				p.log.Warn("saving store on shutdown", "err", err)
 			}
 			return
-		case <-tick.C:
-			p.Tick()
+		case <-time.After(delay):
 		case <-save.C:
 			if err := p.store.Save(); err != nil {
 				p.log.Warn("saving store", "err", err)
 			}
+			continue
 		}
+		p.tickRound()
 	}
 }
 
-// Tick performs one polling round.
-func (p *Poller) Tick() {
+// initialProbe performs one bounded session probe at startup. Failure is
+// non-fatal: later ticks retry with backoff.
+func (p *Poller) initialProbe() {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := p.session.Ensure(ctx); err != nil {
+		p.log.Warn("initial session probe failed; will retry on next tick", "err", err)
+		p.backoff = p.interval
+	}
+}
+
+// tickRound runs one poll tick and adjusts the retry backoff.
+func (p *Poller) tickRound() {
+	if err := p.Tick(); err != nil {
+		if p.backoff == 0 {
+			p.backoff = p.interval
+		} else if p.backoff < maxPollBackoff {
+			p.backoff *= 2
+			if p.backoff > maxPollBackoff {
+				p.backoff = maxPollBackoff
+			}
+		}
+		p.log.Warn("poll tick failed; retrying with backoff",
+			"backoff", p.backoff.String(), "err", err)
+		return
+	}
+	p.backoff = 0
+}
+
+// Tick performs one polling round. A returned error means the round should
+// be retried later (with backoff); device data is never lost between ticks.
+func (p *Poller) Tick() error {
 	ctx, cancel := context.WithTimeout(context.Background(), p.interval*2)
 	defer cancel()
 
 	if p.session.SessionDead() {
 		p.log.Warn("starlink session dead; skipping poll (update STARLINK_SSO_COOKIE)")
-		return
+		return nil
 	}
 
 	// 1. Refresh the roster (cached ~5 min internally).
 	lines, err := p.roster.Get(ctx)
 	if err != nil {
-		p.log.Warn("roster unavailable this tick", "err", err)
+		// Transient (probe rate limit, network, API hiccup): keep any data
+		// already collected and let the caller retry with backoff.
+		return fmt.Errorf("roster unavailable: %w", err)
 	} else {
 		for _, sl := range lines {
 			for _, t := range sl.Terminals {
@@ -145,6 +191,7 @@ func (p *Poller) Tick() {
 	for _, d := range p.store.Devices() {
 		p.pollDevice(ctx, d)
 	}
+	return nil
 }
 
 func (p *Poller) pollDevice(ctx context.Context, d *Device) {

@@ -52,6 +52,7 @@ type fakeAPI struct {
 	mu            sync.Mutex
 	probeCount    int
 	probeStatus   int          // override status for the probe endpoint
+	probeDelay    time.Duration // artificial delay for the probe endpoint
 	handleFn      func(req *device.Request) (*device.Response, int32, string)
 	tokenRenewed  int
 	gatewayStatus int // HTTP status override for gateway calls
@@ -66,7 +67,11 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
 		f.probeCount++
 		n := f.probeCount
 		status := f.probeStatus
+		delay := f.probeDelay
 		f.mu.Unlock()
+		if delay > 0 {
+			time.Sleep(delay)
+		}
 		if status != 200 {
 			w.WriteHeader(status)
 			fmt.Fprintf(w, `{"error":"unauthorized"}`)
@@ -328,6 +333,9 @@ func TestSessionProbeThrottle(t *testing.T) {
 	f, ts := newFakeAPI(t)
 	clock := &fakeClock{now: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}
 	s := newTestSession(t, ts, clock)
+	oldMax := probeAwaitMax
+	probeAwaitMax = 300 * time.Millisecond // keep the test fast
+	t.Cleanup(func() { probeAwaitMax = oldMax })
 
 	// First probe fails with 500 (unexpected status): no token minted.
 	f.mu.Lock()
@@ -340,7 +348,9 @@ func TestSessionProbeThrottle(t *testing.T) {
 	f.probeStatus = 200
 	f.mu.Unlock()
 
-	// A retry within 60s must be throttled, not sent.
+	// A retry within 60s waits for the shared probe window (bounded by
+	// probeAwaitMax) and then reports throttled — it must not send a
+	// second probe.
 	if _, err := s.Token(context.Background()); err == nil || !strings.Contains(err.Error(), "throttled") {
 		t.Fatalf("expected throttle error, got %v", err)
 	}
@@ -352,6 +362,54 @@ func TestSessionProbeThrottle(t *testing.T) {
 	tok, err := s.Token(context.Background())
 	if err != nil || tok != "tok-2" {
 		t.Fatalf("Token after window = %q, %v", tok, err)
+	}
+}
+
+// TestSessionThrottledCallerWaitsForSharedProbe verifies that a caller
+// arriving inside the probe window waits for the in-flight probe (single
+// flight via the session mutex) and reuses its token instead of failing.
+func TestSessionThrottledCallerWaitsForSharedProbe(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	clock := &fakeClock{now: time.Now()}
+	s := newTestSession(t, ts, clock)
+
+	// Start a probe in a goroutine (the fake API delays it).
+	f.mu.Lock()
+	f.probeDelay = 300 * time.Millisecond
+	f.mu.Unlock()
+
+	const workers = 3
+	var wg sync.WaitGroup
+	tokens := make([]string, workers)
+	errs := make([]error, workers)
+	start := time.Now()
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			tokens[i], errs[i] = s.Token(ctx)
+		}(i)
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	f.mu.Lock()
+	probes := f.probeCount
+	f.probeDelay = 0
+	f.mu.Unlock()
+
+	if probes != 1 {
+		t.Fatalf("probeCount = %d, want a single shared probe", probes)
+	}
+	for i := 0; i < workers; i++ {
+		if errs[i] != nil || tokens[i] == "" {
+			t.Errorf("worker %d: token %q err %v", i, tokens[i], errs[i])
+		}
+	}
+	if elapsed < 200*time.Millisecond {
+		t.Errorf("waiters returned too early (%s): they should await the probe", elapsed)
 	}
 }
 

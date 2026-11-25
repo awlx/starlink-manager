@@ -136,6 +136,10 @@ func (s *Session) Ensure(ctx context.Context) error {
 // Refresh forces token renewal or a fresh probe (used after an
 // unauthenticated gateway answer). It keeps the old token for the renewal
 // endpoint and falls back to a probe when renewal is rejected.
+// Refresh forces a re-authentication: stale the current token and mint a
+// fresh one through renewal or a session probe. Throttling is handled by
+// ensureTokenLocked, which waits for the shared probe window instead of
+// failing the caller.
 func (s *Session) Refresh(ctx context.Context) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -143,24 +147,32 @@ func (s *Session) Refresh(ctx context.Context) (string, error) {
 		return "", ErrSessionDead
 	}
 	if s.token != "" {
-		if tok, err := s.renewTokenLocked(ctx); err == nil {
-			return tok, nil
-		} else if errors.Is(err, errRenewRejected) {
-			s.token = ""
-		} else {
-			s.log.Warn("token renewal failed; falling back to session probe", "err", err)
-		}
+		s.tokenAt = time.Time{} // stale the token so a fresh one is minted
 	}
-	now := s.now()
-	if !s.lastProbe.IsZero() && now.Sub(s.lastProbe) < probeMinInterval && s.token == "" {
-		return "", ErrProbeThrottled
-	}
-	return s.probeLocked(ctx)
+	return s.ensureTokenLocked(ctx)
 }
 
 // ensureTokenLocked must be called with s.mu held. It serializes minting so
 // concurrent callers share a single probe (single-flight), and enforces the
 // 60s minimum probe interval.
+const (
+	// probeWaitPoll is the polling interval while waiting for the probe
+	// rate-limit window to expire.
+	probeWaitPoll = 250 * time.Millisecond
+)
+
+// probeAwaitMax bounds how long a dependent caller waits for the shared
+// probe window before giving up (the caller can retry later). It is a
+// variable so tests can shorten it.
+var probeAwaitMax = 20 * time.Second
+
+// ensureTokenLocked returns a usable access token, minting one if needed.
+//
+// The probe rate limit (at most one probe per 60s) must not fail dependent
+// callers such as the roster poll: callers that arrive while the window is
+// still closed wait here — bounded by probeAwaitMax and the caller's
+// context — while the caller holding the mutex performs the single probe.
+// That makes every waiter converge on one shared probe.
 func (s *Session) ensureTokenLocked(ctx context.Context) (string, error) {
 	if s.sessionDead {
 		return "", ErrSessionDead
@@ -169,25 +181,64 @@ func (s *Session) ensureTokenLocked(ctx context.Context) (string, error) {
 	if s.token != "" && now.Sub(s.tokenAt) < tokenFreshFor {
 		return s.token, nil
 	}
-	if s.token != "" && now.Sub(s.lastProbe) >= probeMinInterval {
-		// Try the cheap renewal first; fall back to a full probe on failure.
-		if tok, err := s.renewTokenLocked(ctx); err == nil {
+	if s.token != "" {
+		// Token stale (aged out or staled by Refresh): try the cheap
+		// renewal first; the renewal endpoint is not rate-limited the way
+		// the probe is.
+		tok, err := s.renewTokenLocked(ctx)
+		if err == nil {
 			return tok, nil
-		} else if !errors.Is(err, errRenewRejected) {
-			s.log.Warn("token renewal failed; falling back to session probe", "err", err)
+		}
+		if errors.Is(err, errRenewRejected) {
+			s.token = ""
+		} else {
+			s.log.Warn("token renewal failed; keeping previous token", "err", err)
+			// Inside the probe rate-limit window keep the old token;
+			// otherwise fall through to the probe below.
+			if since := now.Sub(s.lastProbe); !s.lastProbe.IsZero() && since < probeMinInterval {
+				return s.token, nil
+			}
 		}
 	}
-	if !s.lastProbe.IsZero() && now.Sub(s.lastProbe) < probeMinInterval {
-		if s.token != "" {
-			// Keep using the old token rather than hammering the probe.
+	// No token and possibly inside the probe rate-limit window: wait for
+	// the window (or the in-flight probe holding the mutex) instead of
+	// erroring out the caller.
+	waited := time.Duration(0)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		since := s.now().Sub(s.lastProbe)
+		if s.lastProbe.IsZero() || since >= probeMinInterval {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			return s.probeLocked(ctx)
+		}
+		if waited >= probeAwaitMax {
+			return "", fmt.Errorf("%w (waited %s)", ErrProbeThrottled, waited.Round(time.Second))
+		}
+		// Release the mutex so the in-flight probe can run, then poll.
+		s.mu.Unlock()
+		sleep := probeWaitPoll
+		if rem := probeMinInterval - since; rem < sleep {
+			sleep = rem
+		}
+		if rem := probeAwaitMax - waited; rem < sleep {
+			sleep = rem
+		}
+		time.Sleep(sleep)
+		waited += sleep
+		s.mu.Lock()
+		if s.sessionDead {
+			return "", ErrSessionDead
+		}
+		// Another caller's probe may have minted a fresh token while we
+		// waited; reuse it instead of probing again.
+		if s.token != "" && s.now().Sub(s.tokenAt) < tokenFreshFor {
 			return s.token, nil
 		}
-		return "", ErrProbeThrottled
 	}
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	return s.probeLocked(ctx)
 }
 
 // errRenewRejected marks a 401/403 from the renewal endpoint.
@@ -293,7 +344,8 @@ func (s *Session) probeLocked(ctx context.Context) (string, error) {
 
 	var account map[string]any
 	if err := json.Unmarshal(body, &account); err != nil {
-		return "", fmt.Errorf("session probe returned non-JSON body: %w", err)
+		return "", fmt.Errorf("session probe returned non-JSON body: %w (body snippet: %q)",
+			err, truncateForLog(body))
 	}
 	s.accountInfo = account
 	s.accountNum = findAccountNumber(account)

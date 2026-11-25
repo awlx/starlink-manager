@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -68,9 +69,15 @@ func New(cfg *config.Config, authN auth.Authenticator, gateway *starlink.Gateway
 // Handler builds the full HTTP handler tree. /healthz is intentionally
 // unauthenticated so the container health check works without Keycloak.
 func (s *Server) Handler() http.Handler {
+	// The embedded FS root contains templates/ and static/; serve the
+	// static/ subtree directly so /static/style.css resolves.
+	staticFS, err := fs.Sub(embedded, "static")
+	if err != nil {
+		panic(fmt.Sprintf("embed static/: %v", err))
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(embedded))))
+	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 	mux.Handle("GET /api/device/{$}", http.NotFoundHandler())
 
 	s.auth.Routes(mux)
