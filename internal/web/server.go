@@ -207,13 +207,17 @@ func (s *Server) accountNumber() string {
 
 // ---------- device view assembly ----------
 
-const telemetryOnlineTTL = 5 * time.Minute
+// defaultOnlineTTL applies when STARLINK_TELEMETRY_ONLINE_TTL is unset.
+const defaultOnlineTTL = 5 * time.Minute
 
-// isOnline reports whether the device answered a poll within the TTL.
-// Cloud telemetry cadence is roughly 2 min per device, so 5 min staleness
-// means the device is effectively unreachable.
-func isOnline(d *starlink.Device, now time.Time) bool {
-	return !d.LastSeen.IsZero() && now.Sub(d.LastSeen) < telemetryOnlineTTL
+// isOnline reports whether the device answered a poll within the
+// configured TTL (STARLINK_TELEMETRY_ONLINE_TTL).
+func (s *Server) isOnline(d *starlink.Device, now time.Time) bool {
+	ttl := defaultOnlineTTL
+	if s.cfg != nil && s.cfg.TelemetryTTLOnline > 0 {
+		ttl = s.cfg.TelemetryTTLOnline
+	}
+	return !d.LastSeen.IsZero() && now.Sub(d.LastSeen) < ttl
 }
 
 func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
@@ -233,7 +237,7 @@ func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 		v.SerialNumber = d.DishSerial
 	}
 
-	if isOnline(d, now) {
+	if s.isOnline(d, now) {
 		v.OnlineClass = "pill-ok"
 		v.OnlineLabel = "online"
 	} else {

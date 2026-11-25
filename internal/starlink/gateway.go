@@ -37,6 +37,7 @@ type Gateway struct {
 	webBase string
 	client  *http.Client
 	log     *slog.Logger
+	timeout time.Duration // per gateway call (STARLINK_CALL_TIMEOUT)
 
 	mu        sync.Mutex
 	mutations map[string]*sync.Mutex // serialized mutations per target
@@ -55,8 +56,24 @@ func NewGateway(session *Session, webBase string, client *http.Client, log *slog
 		webBase:   strings.TrimRight(webBase, "/"),
 		client:    client,
 		log:       log,
+		timeout:   defaultCallTimeout,
 		mutations: map[string]*sync.Mutex{},
 	}
+}
+
+// defaultCallTimeout bounds a gateway call when no timeout is configured.
+const defaultCallTimeout = 15 * time.Second
+
+// SetCallTimeout sets the per-call timeout (STARLINK_CALL_TIMEOUT).
+func (g *Gateway) SetCallTimeout(d time.Duration) {
+	if d > 0 {
+		g.timeout = d
+	}
+}
+
+// CallTimeout returns the per-call timeout.
+func (g *Gateway) CallTimeout() time.Duration {
+	return g.timeout
 }
 
 // mutationLock returns the per-target lock used to serialize mutations
@@ -107,7 +124,7 @@ func (g *Gateway) handleOnce(ctx context.Context, req *device.Request) (*device.
 		return nil, fmt.Errorf("%w: marshaling request: %v", ErrGateway, err)
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, g.timeout)
 	defer cancel()
 	httpReq, err := http.NewRequestWithContext(cctx, http.MethodPost, g.webBase+gatewayPath, bytesReader(encodeGRPCWeb(payload)))
 	if err != nil {

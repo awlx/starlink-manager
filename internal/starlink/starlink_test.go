@@ -487,6 +487,24 @@ func TestGatewayRoundtrip(t *testing.T) {
 	}
 }
 
+func TestGatewayHonorsCallTimeout(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	s := newTestSession(t, ts, &fakeClock{now: time.Now()})
+	g := NewGateway(s, ts.URL, ts.Client(), nil)
+	g.SetCallTimeout(100 * time.Millisecond)
+	f.handleFn = func(req *device.Request) (*device.Response, int32, string) {
+		time.Sleep(time.Second)
+		return f.defaultHandle(req)
+	}
+	start := time.Now()
+	if _, err := g.GetStatus(context.Background(), KindDish, "ut1"); err == nil {
+		t.Fatal("expected a timeout")
+	}
+	if d := time.Since(start); d > 700*time.Millisecond {
+		t.Fatalf("call took %s, want it bounded by the 100ms call timeout", d)
+	}
+}
+
 func TestGatewayOfflineMapping(t *testing.T) {
 	f, ts := newFakeAPI(t)
 	clock := &fakeClock{now: time.Now()}

@@ -59,6 +59,7 @@ func run() error {
 		log.Info("using configured account number", "account", cfg.StarlinkAccountNumber)
 	}
 	gateway := starlink.NewGateway(session, cfg.StarlinkWebBaseURL, session.DataClient(), log)
+	gateway.SetCallTimeout(cfg.CallTimeout)
 	roster := starlink.NewRoster(session, cfg.StarlinkAPIBaseURL, cfg.RosterCacheTTL, log)
 	telemetry := starlink.NewTelemetry(session, cfg.StarlinkAPIBaseURL, log)
 

@@ -361,9 +361,8 @@ func TestDevicePageObstructionBadge(t *testing.T) {
 func TestHistoryIncludesObstructionFields(t *testing.T) {
 	srv, ts := newTestServer(t)
 	d := seedDevice(t, srv.store)
-	now := time.Now().Unix()
 	srv.store.AppendHistory(d.ID, &device.DishGetHistoryResponse{
-		Current:          proto.Uint64(uint64(now)),
+		Current:          proto.Uint64(2),
 		PopPingLatencyMs: []float32{40, 41},
 		Scheduled:        []bool{false, true},
 		Obstructed:       []bool{true, false},
@@ -398,3 +397,17 @@ func readAll(t *testing.T, resp *http.Response) string {
 }
 
 var _ = context.Background
+
+func TestOnlineUsesConfiguredTTL(t *testing.T) {
+	srv, _ := newTestServer(t)
+	now := time.Now()
+	d := &starlink.Device{ID: "ut-ttl", Kind: starlink.KindDish, LastSeen: now.Add(-2 * time.Minute)}
+	srv.cfg.TelemetryTTLOnline = time.Minute
+	if v := srv.deviceView(d, now); v.OnlineLabel != "unreachable" {
+		t.Fatalf("label = %q with a 1m TTL and a 2m old poll", v.OnlineLabel)
+	}
+	srv.cfg.TelemetryTTLOnline = 10 * time.Minute
+	if v := srv.deviceView(d, now); v.OnlineLabel != "online" {
+		t.Fatalf("label = %q with a 10m TTL", v.OnlineLabel)
+	}
+}

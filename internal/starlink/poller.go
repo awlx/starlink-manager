@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/awlx/starlink-manager/api/device"
@@ -26,6 +27,11 @@ type Poller struct {
 
 	stop     chan struct{}
 	stopOnce sync.Once
+	done     chan struct{} // closed when run returns (after the final save)
+	started  atomic.Bool
+	// ctx is cancelled by Stop so in-flight calls end promptly.
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	// backoff grows when a tick fails (e.g. probe rate limit) and delays
 	// the next attempt instead of hammering the API.
@@ -34,7 +40,10 @@ type Poller struct {
 
 // NewPoller wires the poller.
 func NewPoller(gateway *Gateway, roster *Roster, telemetry *Telemetry, session *Session, store *Store, interval time.Duration, log *slog.Logger) *Poller {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Poller{
+		ctx:       ctx,
+		cancel:    cancel,
 		gateway:   gateway,
 		roster:    roster,
 		telemetry: telemetry,
@@ -44,17 +53,29 @@ func NewPoller(gateway *Gateway, roster *Roster, telemetry *Telemetry, session *
 		saveEvery: time.Minute,
 		log:       log,
 		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 }
 
 // Start launches the polling loop in a goroutine.
 func (p *Poller) Start() {
-	go p.run()
+	p.started.Store(true)
+	go func() {
+		defer close(p.done)
+		p.run()
+	}()
 }
 
-// Stop terminates the loop and flushes the store.
+// Stop terminates the loop and waits until the store has been flushed, so
+// the final save is not lost when the process exits right after.
 func (p *Poller) Stop() {
-	p.stopOnce.Do(func() { close(p.stop) })
+	p.stopOnce.Do(func() {
+		p.cancel()
+		close(p.stop)
+	})
+	if p.started.Load() {
+		<-p.done
+	}
 }
 
 // maxPollBackoff caps the retry backoff after failed ticks.
@@ -98,7 +119,7 @@ func (p *Poller) run() {
 // initialProbe performs one bounded session probe at startup. Failure is
 // non-fatal: later ticks retry with backoff.
 func (p *Poller) initialProbe() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(p.ctx, 20*time.Second)
 	defer cancel()
 	if err := p.session.Ensure(ctx); err != nil {
 		p.log.Warn("initial session probe failed; will retry on next tick", "err", err)
@@ -129,7 +150,10 @@ func (p *Poller) tickRound() {
 // Tick performs one polling round. A returned error means the round should
 // be retried later (with backoff); device data is never lost between ticks.
 func (p *Poller) Tick() error {
-	ctx, cancel := context.WithTimeout(context.Background(), p.interval*2)
+	// Roster and telemetry share one bounded context; device polls get
+	// their own budgets below so a long device list or slow devices cannot
+	// starve the rest of the round.
+	ctx, cancel := context.WithTimeout(p.ctx, max(p.interval*2, 4*p.gateway.CallTimeout()))
 	defer cancel()
 
 	if p.session.SessionDead() {
@@ -197,13 +221,19 @@ func (p *Poller) Tick() error {
 
 	// 3. Poll every device through the gateway: status + history.
 	for _, d := range p.store.Devices() {
-		p.pollDevice(ctx, d)
+		if p.ctx.Err() != nil {
+			break
+		}
+		p.pollDevice(p.ctx, d)
 	}
 	return nil
 }
 
+// pollDevice fetches status and history; each gateway call is bounded by the
+// gateway call timeout, the device as a whole by twice that (plus slack for
+// a token refresh).
 func (p *Poller) pollDevice(ctx context.Context, d *Device) {
-	devCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	devCtx, cancel := context.WithTimeout(ctx, 3*p.gateway.CallTimeout())
 	defer cancel()
 
 	resp, err := p.gateway.GetStatus(devCtx, d.Kind, d.ID)
