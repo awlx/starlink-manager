@@ -199,3 +199,16 @@ func TestSplitList(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadLocalDevRequiresOptIn(t *testing.T) {
+	env := map[string]string{"STARLINK_SSO_COOKIE": "c", "AUTH_MODE": "localdev"}
+	if _, err := load(loader(env)); err == nil || !strings.Contains(err.Error(), "LOCAL_DEV_USER=true") {
+		t.Fatalf("AUTH_MODE=localdev without LOCAL_DEV_USER: err = %v, want opt-in error", err)
+	}
+	env["AUTH_MODE"] = "LocalDev"
+	env["LOCAL_DEV_USER"] = "true"
+	cfg, err := load(loader(env))
+	if err != nil || cfg.AuthMode != AuthModeLocalDev {
+		t.Fatalf("mixed-case AUTH_MODE with LOCAL_DEV_USER: cfg %q err %v", cfg.AuthMode, err)
+	}
+}

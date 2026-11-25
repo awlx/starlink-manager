@@ -148,7 +148,7 @@ func load(getenv func(string) string) (Config, error) {
 	}
 
 	// Auth mode.
-	mode := strings.TrimSpace(getenv("AUTH_MODE"))
+	mode := strings.ToLower(strings.TrimSpace(getenv("AUTH_MODE")))
 	localDev := strings.TrimSpace(getenv("LOCAL_DEV_USER"))
 	switch strings.ToLower(localDev) {
 	case "", "false", "0", "no":
@@ -163,13 +163,17 @@ func load(getenv func(string) string) (Config, error) {
 	}
 	if localDev == "true" {
 		mode = "localdev"
+	} else if mode == "localdev" {
+		// localdev makes every request an admin; require the explicit opt-in
+		// so a stray AUTH_MODE alone cannot open the app.
+		return cfg, errors.New("AUTH_MODE=localdev requires LOCAL_DEV_USER=true")
 	}
 	if mode == "" {
 		mode = string(AuthModeOIDC)
 	}
-	switch AuthMode(strings.ToLower(mode)) {
+	switch AuthMode(mode) {
 	case AuthModeOIDC, AuthModeForwardAuth, AuthModeLocalDev:
-		cfg.AuthMode = AuthMode(strings.ToLower(mode))
+		cfg.AuthMode = AuthMode(mode)
 	default:
 		return cfg, fmt.Errorf("AUTH_MODE must be one of oidc, forwardauth, localdev (got %q)", mode)
 	}
