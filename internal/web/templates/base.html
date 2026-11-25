@@ -1,0 +1,43 @@
+{{define "base"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · FFMUC Starlink Manager</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <a href="/" class="logo">📡 Starlink Manager</a>
+      <span class="subtitle">FFMUC</span>
+    </div>
+    <nav class="nav">
+      <a href="/">Dashboard</a>
+      {{if .User}}
+        <span class="user">
+          {{if .User.Admin}}<span class="badge admin">admin</span>{{end}}
+          {{.User.Name}}
+          <a href="{{.LogoutURL}}" class="logout">log out</a>
+        </span>
+      {{end}}
+    </nav>
+  </header>
+  {{if .SessionDead}}
+  <div class="banner banner-error">
+    ⚠️ Starlink session invalid — re-authenticate at <a href="https://www.starlink.com/account" target="_blank" rel="noopener">starlink.com</a>
+    and update the <code>STARLINK_SSO_COOKIE</code> secret.
+  </div>
+  {{end}}
+  <main>
+    {{template "content" .}}
+  </main>
+  <footer class="footer">
+    <span>FFMUC Starlink Manager</span>
+    <span class="poll-info" data-poll-info></span>
+  </footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>
+{{end}}

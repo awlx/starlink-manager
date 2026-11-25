@@ -1,0 +1,43 @@
+{{define "dashboard"}}{{template "base" .}}{{end}}
+{{define "content"}}
+<div class="page-header">
+  <h1>Devices</h1>
+  <p class="muted">
+    {{len .Devices}} device(s) on account {{.AccountNumber}} ·
+    account state: <span class="pill {{if .SessionDead}}pill-error{{else}}pill-ok{{end}}">{{if .SessionDead}}session invalid{{else if .LastRosterError}}roster error{{else}}ok{{end}}</span>
+  </p>
+</div>
+
+{{if .Devices}}
+<div class="grid" id="device-grid">
+  {{range .Devices}}
+  <a class="card device-card" href="/device/{{.ID}}" data-device-id="{{.ID}}">
+    <div class="card-head">
+      <span class="device-name">{{.DisplayName}}</span>
+      <span class="pill {{.OnlineClass}}" data-field="online">{{.OnlineLabel}}</span>
+    </div>
+    <dl class="kv">
+      <dt>Kind</dt><dd>{{.KindLabel}}{{if .Nickname}} · {{.Nickname}}{{end}}</dd>
+      <dt>State</dt><dd data-field="state">{{.StateLabel}}</dd>
+      <dt>SNR / signal</dt><dd data-field="snr">{{.SNRText}}</dd>
+      <dt>Obstruction</dt><dd data-field="obstruction">{{.ObstructionText}}</dd>
+      <dt>Versions</dt><dd data-field="versions">{{.VersionsText}}</dd>
+      <dt>Service</dt><dd>{{.ServiceLineName}}</dd>
+    </dl>
+    <div class="alerts" data-field="alerts">
+      {{range .Alerts}}<span class="pill pill-warn">{{.}}</span>{{end}}
+    </div>
+  </a>
+  {{end}}
+</div>
+{{else}}
+<div class="card empty-card">
+  <h2>No devices found</h2>
+  <p class="muted">
+    No service lines with dishes or routers were returned by the account API.
+    Check that the account behind <code>STARLINK_SSO_COOKIE</code> actually has
+    active service lines.
+  </p>
+</div>
+{{end}}
+{{end}}

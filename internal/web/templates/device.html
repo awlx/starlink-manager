@@ -1,0 +1,59 @@
+{{define "device"}}{{template "base" .}}{{end}}
+{{define "content"}}
+<div class="page-header">
+  <h1>{{.Device.DisplayName}}</h1>
+  <p class="muted">
+    {{.Device.KindLabel}} · {{.Device.ServiceLineName}}
+    {{if .Device.Nickname}} · {{.Device.Nickname}}{{end}} ·
+    serial <code>{{.Device.SerialNumber}}</code>
+    <span class="pill {{.Device.OnlineClass}}" data-field="online">{{.Device.OnlineLabel}}</span>
+  </p>
+</div>
+
+{{if .AdminUser}}
+<div class="card">
+  <h2>Actions</h2>
+  <div class="actions">
+    <button class="btn btn-danger" data-action="reboot" data-device-id="{{.Device.ID}}">Reboot</button>
+    <button class="btn" data-action="stow" data-device-id="{{.Device.ID}}">Stow</button>
+    <button class="btn" data-action="unstow" data-device-id="{{.Device.ID}}">Unstow</button>
+    <button class="btn" data-action="inhibit_rf" data-device-id="{{.Device.ID}}">Inhibit RF</button>
+    <button class="btn" data-action="allow_rf" data-device-id="{{.Device.ID}}">Allow RF</button>
+    <button class="btn" data-action="power_save" data-device-id="{{.Device.ID}}">Power save schedule</button>
+  </div>
+  <div id="action-outcome" class="outcome" hidden></div>
+</div>
+{{end}}
+
+<div class="card">
+  <div class="card-head">
+    <h2>History</h2>
+    <div class="window-picker" role="group" aria-label="History window">
+      {{range .Windows}}
+      <button class="btn btn-sm{{if .Selected}} btn-selected{{end}}"
+              data-window="{{.Value}}"
+              data-device-id="{{$.Device.ID}}">{{.Label}}</button>
+      {{end}}
+    </div>
+  </div>
+  <div class="charts">
+    {{range .Charts}}
+    <div class="chart-block">
+      <h3>{{.Title}}</h3>
+      <svg class="chart" data-chart="{{.Key}}" data-device-id="{{$.Device.ID}}" aria-label="{{.Title}}" role="img"></svg>
+      <p class="muted chart-summary" data-chart-summary="{{.Key}}">no samples</p>
+    </div>
+    {{end}}
+  </div>
+</div>
+
+<div class="card">
+  <h2>Current status</h2>
+  <dl class="kv wide" id="device-status">
+    {{range .StatusRows}}
+    <dt>{{.Label}}</dt><dd data-field="{{.Field}}">{{.Value}}</dd>
+    {{end}}
+  </dl>
+  <p class="muted" data-field="updated">updated {{.Device.LastSeenText}}</p>
+</div>
+{{end}}

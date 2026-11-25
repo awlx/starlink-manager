@@ -19,6 +19,10 @@ func withUser(ctx context.Context, u *User) context.Context {
 	return context.WithValue(ctx, ctxUserKey{}, u)
 }
 
+// WithUser stores a resolved user in the context. It is exported for tests
+// and for middleware composition outside this package.
+func WithUser(ctx context.Context, u *User) context.Context { return withUser(ctx, u) }
+
 // Authenticator resolves the current user for a request. Implementations:
 // OIDCAuth (Keycloak), ForwardAuth (proxy headers), LocalDev.
 type Authenticator interface {
