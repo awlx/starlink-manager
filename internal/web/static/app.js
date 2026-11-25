@@ -363,11 +363,11 @@
 
     if (action === "power_save") {
       ev.preventDefault();
-      var start = prompt("Power save start minutes after midnight UTC (0 = 00:00):", "0");
+      var start = prompt("Power save start: minutes past midnight UTC (0 = 00:00 UTC). The dish schedule clock is UTC, not local time:", "0");
       if (start === null) return;
       var dur = prompt("Duration in minutes:", "480");
       if (dur === null) return;
-      var enable = confirm("Enable scheduled power save (OK) or disable it (Cancel)?\nOK = enable with start " + start + " for " + dur + " minutes\nCancel = disable power save");
+      var enable = confirm("Enable scheduled power save (OK) or disable it (Cancel)?\nOK = enable with start " + start + " minutes past midnight UTC for " + dur + " minutes\nCancel = disable power save");
       if (!enable && !confirm("Disable power save now?")) return;
       btn.disabled = true;
       postJSON("/api/device/" + id + "/action", {

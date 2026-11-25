@@ -24,6 +24,8 @@ network can still be monitored and controlled through the Starlink cloud.
   windows are downsampled server-side (≤ 2000 buckets per chart).
 - **Admin actions** (behind Keycloak authentication and an admin group
   claim): reboot, stow / unstow, inhibit / allow RF, scheduled power save.
+  The power-save start time is entered in **minutes past midnight UTC** —
+  the dish schedule clock is UTC, not local time.
 - **Router view**: connected WiFi clients.
 - `/healthz` is unauthenticated for container health checks.
 

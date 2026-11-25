@@ -290,8 +290,9 @@ func (g *Gateway) Stow(ctx context.Context, id string, unstow bool) error {
 }
 
 // SetPowerSave configures power save mode on a dish. startMinutes is the
-// local time of day in minutes when power save starts, durationMinutes how
-// long it lasts; enable turns the schedule on or off.
+// start time in minutes past midnight UTC (the app/site uses UTC for the
+// sleep schedule), durationMinutes how long it lasts; enable turns the
+// schedule on or off.
 func (g *Gateway) SetPowerSave(ctx context.Context, id string, startMinutes, durationMinutes uint32, enable bool) error {
 	return g.mutate(ctx, KindDish, id, func() *device.Request {
 		return &device.Request{
