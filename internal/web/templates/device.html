@@ -1,57 +1,48 @@
 {{define "device"}}{{template "base" .}}{{end}}
 {{define "content"}}
 <div class="page-header">
+  <a class="breadcrumb" href="/">← Fleet overview</a>
+  <div class="eyebrow">{{.Device.KindLabel}} telemetry</div>
   <h1>{{.Device.DisplayName}}</h1>
   <p class="muted">
     {{.Device.KindLabel}} · {{.Device.ServiceLineName}}
     {{if .Device.Nickname}} · {{.Device.Nickname}}{{end}} ·
     serial <code>{{.Device.SerialNumber}}</code>
-    <span class="pill {{.Device.OnlineClass}}" data-field="online">{{.Device.OnlineLabel}}</span>
+    <span class="pill {{.Device.HealthClass}}" data-field="online">{{.Device.HealthLabel}}</span>
   </p>
 </div>
 
-{{if .AdminUser}}
-<div class="card">
-  <h2>Actions</h2>
-  <div class="actions">
-    <button class="btn btn-danger" data-action="reboot" data-device-id="{{.Device.ID}}">Reboot</button>
-    <button class="btn" data-action="stow" data-device-id="{{.Device.ID}}">Stow</button>
-    <button class="btn" data-action="unstow" data-device-id="{{.Device.ID}}">Unstow</button>
-    <button class="btn" data-action="inhibit_rf" data-device-id="{{.Device.ID}}">Inhibit RF</button>
-    <button class="btn" data-action="allow_rf" data-device-id="{{.Device.ID}}">Allow RF</button>
-    <button class="btn" data-action="power_save" data-device-id="{{.Device.ID}}">Power save schedule</button>
-  </div>
-  <div id="action-outcome" class="outcome" hidden></div>
-</div>
-{{end}}
-
-<div class="card">
+<section class="card history-card" aria-labelledby="history-heading">
   <div class="card-head">
-    <h2>History</h2>
+    <div><div class="eyebrow">Link performance</div><h2 id="history-heading">History</h2></div>
     <div class="window-picker" role="group" aria-label="History window">
       {{range .Windows}}
       <button class="btn btn-sm{{if .Selected}} btn-selected{{end}}"
               data-window="{{.Value}}"
+              aria-label="Show {{.Label}} of history"
+              aria-pressed="{{if .Selected}}true{{else}}false{{end}}"
               data-device-id="{{$.Device.ID}}">{{.Label}}</button>
       {{end}}
     </div>
   </div>
+  <p class="chart-help muted" id="chart-help">Point at a chart to inspect a sample, or focus it and use the arrow keys. Values reflect collected telemetry.</p>
   <div class="charts">
     {{range .Charts}}
     <div class="chart-block">
       <h3>{{.Title}}</h3>
-      <svg class="chart" data-chart="{{.Key}}" data-device-id="{{$.Device.ID}}" aria-label="{{.Title}}" role="img"></svg>
-      <p class="muted chart-summary" data-chart-summary="{{.Key}}">no samples</p>
+      <svg class="chart" data-chart="{{.Key}}" data-device-id="{{$.Device.ID}}" aria-label="{{.Title}}" aria-describedby="chart-help summary-{{.Key}}" role="img" tabindex="0"></svg>
+      <div class="chart-tooltip" hidden></div>
+      <p class="muted chart-summary" id="summary-{{.Key}}" data-chart-summary="{{.Key}}" aria-live="polite">Loading history…</p>
     </div>
     {{end}}
   </div>
-</div>
+</section>
 
-<div class="card">
-  <h2>Current status</h2>
+<section class="card" aria-labelledby="status-heading">
+  <div class="card-head"><div><div class="eyebrow">Device diagnostics</div><h2 id="status-heading">Current status</h2></div><span class="muted snapshot-note">Snapshot · {{.Device.LastSeenText}}</span></div>
   <p class="obstruction-line" data-field="obstructionLine">
     <span class="pill {{.Device.ObstructionClass}}" data-field="obstruction">{{.Device.ObstructionText}}</span>
-    <span class="obstruction-bar" role="img" aria-label="Obstruction fraction of sky view">
+    <span class="obstruction-bar" role="img" aria-label="Obstruction fraction of sky view: {{.Device.ObstructionText}}">
       <span class="obstruction-fill {{.Device.ObstructionClass}}" style="width: {{.Device.ObstructionBarPct}}%"></span>
     </span>
   </p>
@@ -60,6 +51,22 @@
     <dt>{{.Label}}</dt><dd data-field="{{.Field}}">{{.Value}}</dd>
     {{end}}
   </dl>
-  <p class="muted" data-field="updated">updated {{.Device.LastSeenText}}</p>
-</div>
+  <p class="muted snapshot-note">Status snapshot at page load. Reload for the latest diagnostics.</p>
+</section>
+
+{{if .AdminUser}}
+<section class="card action-card" aria-labelledby="actions-heading">
+  <div class="card-head"><div><div class="eyebrow">Device management</div><h2 id="actions-heading">Actions</h2></div><span class="badge admin">admin only</span></div>
+  <p class="muted">These actions can interrupt connectivity. You’ll be asked to confirm before any change.</p>
+  <div class="actions">
+    <button class="btn btn-danger" data-action="reboot" data-device-id="{{.Device.ID}}" aria-label="Reboot device">Reboot</button>
+    <button class="btn" data-action="stow" data-device-id="{{.Device.ID}}" aria-label="Stow dish">Stow</button>
+    <button class="btn" data-action="unstow" data-device-id="{{.Device.ID}}" aria-label="Unstow dish">Unstow</button>
+    <button class="btn" data-action="inhibit_rf" data-device-id="{{.Device.ID}}" aria-label="Inhibit RF transmission">Inhibit RF</button>
+    <button class="btn" data-action="allow_rf" data-device-id="{{.Device.ID}}" aria-label="Allow RF transmission">Allow RF</button>
+    <button class="btn" data-action="power_save" data-device-id="{{.Device.ID}}" aria-label="Configure power save schedule">Power save schedule</button>
+  </div>
+  <div id="action-outcome" class="outcome" role="status" hidden></div>
+</section>
+{{end}}
 {{end}}

@@ -1,32 +1,50 @@
 {{define "dashboard"}}{{template "base" .}}{{end}}
 {{define "content"}}
 <div class="page-header">
-  <h1>Devices</h1>
+  <div class="eyebrow">Network overview</div>
+  <h1>Your fleet, at a glance.</h1>
   <p class="muted">
-    {{len .Devices}} device(s) on account {{.AccountNumber}} ·
-    account state: <span class="pill {{if or .SessionDead .LastRosterError}}pill-error{{else}}pill-ok{{end}}"{{if .LastRosterError}} title="{{.LastRosterError}}"{{end}}>{{if .SessionDead}}session invalid{{else if .LastRosterError}}roster error{{else}}ok{{end}}</span>
+    {{if .AccountNumber}}Account <span class="mono">{{.AccountNumber}}</span> · {{end}}
+    <span class="pill {{if or .SessionDead .LastRosterError}}pill-error{{else}}pill-ok{{end}}">{{if .SessionDead}}session invalid{{else if .LastRosterError}}roster error{{else}}account connected{{end}}</span>
   </p>
 </div>
+{{if .LastRosterError}}
+<div class="banner banner-error roster-banner" role="alert"><strong>Roster refresh failed.</strong> {{.LastRosterError}} <span>Showing the last known devices.</span></div>
+{{end}}
 
 {{if .Devices}}
+<section class="fleet-stats" aria-label="Fleet health">
+  <div class="stat-card"><span class="stat-label">Total devices</span><strong data-count="total">{{len .Devices}}</strong><span class="stat-note">Across your account</span></div>
+  <div class="stat-card stat-ok"><span class="stat-label">Online</span><strong data-count="online">{{.OnlineCount}}</strong><span class="stat-note">Reachable · no active warnings</span></div>
+  <div class="stat-card stat-warn"><span class="stat-label">Degraded</span><strong data-count="degraded">{{.DegradedCount}}</strong><span class="stat-note">Reachable · needs attention</span></div>
+  <div class="stat-card stat-error"><span class="stat-label">Unreachable</span><strong data-count="offline">{{.OfflineCount}}</strong><span class="stat-note">Offline or stale telemetry</span></div>
+</section>
+<div class="section-heading"><div><div class="eyebrow">Hardware inventory</div><h2>Devices <span class="count-badge">{{len .Devices}}</span></h2></div><span class="muted">Select a device to explore <span aria-hidden="true">↗</span></span></div>
 <div class="grid" id="device-grid">
   {{range .Devices}}
   <a class="card device-card" href="/device/{{.ID}}" data-device-id="{{.ID}}">
     <div class="card-head">
-      <span class="device-name">{{.DisplayName}}</span>
-      <span class="pill {{.OnlineClass}}" data-field="online">{{.OnlineLabel}}</span>
+      <span class="device-kind"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 5a10 10 0 0 0 14 14L5 5Zm7 8 6-6m-6 11v3m-5 0h10M16 3a5 5 0 0 1 5 5"/></svg>{{.KindLabel}}</span>
+      <span class="pill {{.HealthClass}}" data-field="online">{{.HealthLabel}}</span>
+    </div>
+    <h3 class="device-name">{{.DisplayName}}</h3>
+    <p class="device-location">{{if .ServiceLineName}}{{.ServiceLineName}}{{else}}No service name{{end}}{{if .Nickname}} · {{.Nickname}}{{end}}</p>
+    <div class="device-metrics" aria-label="Latest status snapshot">
+      <div><span>Ping</span><strong>{{.PingText}}</strong></div>
+      <div><span>↓ Downlink</span><strong>{{.DownlinkText}}</strong></div>
+      <div><span>↑ Uplink</span><strong>{{.UplinkText}}</strong></div>
     </div>
     <dl class="kv">
-      <dt>Kind</dt><dd>{{.KindLabel}}{{if .Nickname}} · {{.Nickname}}{{end}}</dd>
       <dt>State</dt><dd data-field="state">{{.StateLabel}}</dd>
+      <dt>Ping drop</dt><dd>{{.DropText}}</dd>
       <dt>SNR / signal</dt><dd data-field="snr">{{.SNRText}}</dd>
       <dt>Obstruction</dt><dd data-field="obstruction"><span class="pill {{.ObstructionClass}}">{{.ObstructionText}}</span></dd>
       <dt>Versions</dt><dd data-field="versions">{{.VersionsText}}</dd>
-      <dt>Service</dt><dd>{{.ServiceLineName}}</dd>
     </dl>
     <div class="alerts" data-field="alerts">
       {{range .Alerts}}<span class="pill pill-warn">{{.}}</span>{{end}}
     </div>
+    <div class="card-foot"><span>Snapshot · {{.LastSeenText}}</span><span class="card-open">View device <span aria-hidden="true">↗</span></span></div>
   </a>
   {{end}}
 </div>

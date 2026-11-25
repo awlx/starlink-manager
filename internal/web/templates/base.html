@@ -7,15 +7,17 @@
   <title>{{.Title}} · FFMUC Starlink Manager</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.ico">
   <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/theme.js"></script>
 </head>
 <body>
+  <a class="skip-link" href="#main">Skip to content</a>
   <header class="topbar">
     <div class="brand">
-      <a href="/" class="logo">📡 Starlink Manager</a>
-      <span class="subtitle">FFMUC</span>
+      <a href="/" class="logo"><img src="/favicon.ico" width="36" height="36" alt=""><span>Starlink<span class="brand-caption">FFMUC · Network operations</span></span></a>
     </div>
-    <nav class="nav">
-      <a href="/">Dashboard</a>
+    <nav class="nav" aria-label="Main navigation">
+      <a href="/" class="nav-dashboard">Overview</a>
+      <button class="btn theme-toggle" type="button" data-theme-toggle aria-label="Switch to light theme" aria-pressed="false" hidden>Light mode</button>
       {{if .User}}
         <span class="user">
           {{if .User.Admin}}<span class="badge admin">admin</span>{{end}}
@@ -26,17 +28,17 @@
     </nav>
   </header>
   {{if .SessionDead}}
-  <div class="banner banner-error">
-    ⚠️ Starlink session invalid — re-authenticate at <a href="https://www.starlink.com/account" target="_blank" rel="noopener">starlink.com</a>
+  <div class="banner banner-error" role="alert">
+    Starlink session invalid — re-authenticate at <a href="https://www.starlink.com/account" target="_blank" rel="noopener">starlink.com</a>
     and update the <code>STARLINK_SSO_COOKIE</code> secret.
   </div>
   {{end}}
-  <main>
+  <main id="main" tabindex="-1">
     {{template "content" .}}
   </main>
   <footer class="footer">
-    <span>FFMUC Starlink Manager</span>
-    <span class="poll-info" data-poll-info></span>
+    <span>FFMUC <span class="footer-divider">/</span> Starlink operations</span>
+    <span class="poll-info" data-poll-info>Telemetry snapshots · refresh every 30s</span>
   </footer>
   <script src="/static/app.js"></script>
 </body>

@@ -1,45 +1,48 @@
 {{define "router"}}{{template "base" .}}{{end}}
 {{define "content"}}
 <div class="page-header">
+  <a class="breadcrumb" href="/">← Fleet overview</a>
+  <div class="eyebrow">Router telemetry</div>
   <h1>{{.Device.DisplayName}}</h1>
   <p class="muted">
     Router · {{.Device.ServiceLineName}}
     {{if .Device.Nickname}} · {{.Device.Nickname}}{{end}} ·
     ID <code>{{.Device.ID}}</code>
-    <span class="pill {{.Device.OnlineClass}}" data-field="online">{{.Device.OnlineLabel}}</span>
+    <span class="pill {{.Device.HealthClass}}" data-field="online">{{.Device.HealthLabel}}</span>
   </p>
 </div>
 
-{{if .AdminUser}}
-<div class="card">
-  <h2>Actions</h2>
-  <div class="actions">
-    <button class="btn btn-danger" data-action="reboot" data-device-id="{{.Device.ID}}">Reboot</button>
-  </div>
-  <div id="action-outcome" class="outcome" hidden></div>
-</div>
-{{end}}
-
 <div class="card">
   <div class="card-head">
-    <h2>WiFi clients</h2>
-    <button class="btn btn-sm" data-action="refresh_clients" data-device-id="{{.Device.ID}}">Refresh</button>
+    <div><div class="eyebrow">Local network</div><h2>WiFi clients</h2></div>
+    <button class="btn btn-sm" data-action="refresh_clients" data-device-id="{{.Device.ID}}" aria-label="Refresh WiFi clients">Refresh</button>
   </div>
   <div class="table-wrap">
     <table class="clients-table" id="clients-table" data-device-id="{{.Device.ID}}">
-      <thead><tr><th>Name / hostname</th><th>MAC</th><th>Band</th><th>IP</th><th>dBm</th></tr></thead>
+      <caption class="sr-only">Connected WiFi clients</caption>
+      <thead><tr><th scope="col">Name / hostname</th><th scope="col">MAC</th><th scope="col">Band</th><th scope="col">IP</th><th scope="col">dBm</th></tr></thead>
       <tbody><tr><td colspan="5" class="muted">loading…</td></tr></tbody>
     </table>
   </div>
 </div>
 
 <div class="card">
-  <h2>Current status</h2>
+  <div class="eyebrow">Device diagnostics</div><h2>Current status</h2>
   <dl class="kv wide" id="device-status">
     {{range .StatusRows}}
     <dt>{{.Label}}</dt><dd data-field="{{.Field}}">{{.Value}}</dd>
     {{end}}
   </dl>
-  <p class="muted" data-field="updated">updated {{.Device.LastSeenText}}</p>
+  <p class="muted snapshot-note">Snapshot · {{.Device.LastSeenText}}. Reload for the latest diagnostics.</p>
 </div>
+{{if .AdminUser}}
+<section class="card action-card" aria-labelledby="actions-heading">
+  <div class="card-head"><h2 id="actions-heading">Actions</h2><span class="badge admin">admin only</span></div>
+  <p class="muted">Rebooting interrupts connectivity. You’ll be asked to confirm.</p>
+  <div class="actions">
+    <button class="btn btn-danger" data-action="reboot" data-device-id="{{.Device.ID}}" aria-label="Reboot router">Reboot</button>
+  </div>
+  <div id="action-outcome" class="outcome" role="status" hidden></div>
+</section>
+{{end}}
 {{end}}

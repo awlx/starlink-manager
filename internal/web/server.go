@@ -140,6 +140,12 @@ type DeviceView struct {
 	ObstructionBarPct int
 	VersionsText      string
 	Alerts            []string
+	HealthClass       string
+	HealthLabel       string
+	PingText          string
+	DropText          string
+	DownlinkText      string
+	UplinkText        string
 }
 
 type statusRow struct {
@@ -172,6 +178,9 @@ type dashboardData struct {
 	pageInfo
 	Devices         []DeviceView
 	LastRosterError string
+	OnlineCount     int
+	DegradedCount   int
+	OfflineCount    int
 }
 
 type errorData struct {
@@ -245,6 +254,10 @@ func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 		DisplayName:  d.Name,
 		Nickname:     nicknameOf(d),
 		SerialNumber: d.Serial,
+		PingText:     "—",
+		DropText:     "—",
+		DownlinkText: "—",
+		UplinkText:   "—",
 	}
 	v.KindLabel = "Dish"
 	v.ServiceLineName = d.ServiceLine
@@ -293,6 +306,17 @@ func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 			}
 		}
 		v.Alerts = activeAlerts(st.Alerts)
+		if d.Kind == starlink.KindRouter {
+			if st.Wifi != nil {
+				v.PingText = msText(st.Wifi.PingLatencyMs)
+				v.DropText = pctText(st.Wifi.PingDropRate)
+			}
+		} else {
+			v.PingText = msText(st.PopPingLatencyMs)
+			v.DropText = pctText(st.PopPingDropRate)
+			v.DownlinkText = compactBpsText(st.DownlinkThroughput)
+			v.UplinkText = compactBpsText(st.UplinkThroughput)
+		}
 	}
 	if v.StateLabel == "" {
 		v.StateLabel = "unknown"
@@ -306,7 +330,25 @@ func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 	if v.VersionsText == "" {
 		v.VersionsText = "—"
 	}
+	// Health is presentation-only; API reachability semantics stay unchanged.
+	v.HealthClass, v.HealthLabel = v.OnlineClass, v.OnlineLabel
+	if v.OnlineClass == "pill-ok" && (len(v.Alerts) > 0 || v.ObstructionClass == "pill-warn" || v.ObstructionClass == "pill-error") {
+		v.HealthClass, v.HealthLabel = "pill-warn", "degraded"
+	}
 	return v
+}
+
+func compactBpsText(v float64) string {
+	units := []string{"bps", "Kbps", "Mbps", "Gbps"}
+	i := 0
+	for v >= 1000 && i < len(units)-1 {
+		v /= 1000
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%.0f %s", v, units[i])
+	}
+	return fmt.Sprintf("%.1f %s", v, units[i])
 }
 
 func nicknameOf(d *starlink.Device) string {
@@ -348,6 +390,17 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		pageInfo:        s.baseInfo(r),
 		Devices:         devs,
 		LastRosterError: s.roster.LastError(),
+	}
+	data.Title = "Fleet overview"
+	for _, d := range devs {
+		switch d.HealthClass {
+		case "pill-ok":
+			data.OnlineCount++
+		case "pill-warn":
+			data.DegradedCount++
+		default:
+			data.OfflineCount++
+		}
 	}
 	s.render(w, "dashboard", data)
 }
@@ -445,6 +498,7 @@ func (s *Server) handleDevicePage(w http.ResponseWriter, r *http.Request) {
 		},
 		StatusRows: s.statusRows(d),
 	}
+	data.Title = d.Name
 	page := "device"
 	if d.Kind == starlink.KindRouter {
 		page = "router"

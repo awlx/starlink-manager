@@ -27,11 +27,23 @@
   function drawChart(svg, series, opts) {
     var ns = "http://www.w3.org/2000/svg";
     while (svg.firstChild) svg.removeChild(svg.firstChild);
-    if (!series || series.length < 1) return;
+    svg.onpointermove = svg.onpointerleave = svg.onkeydown = svg.onfocus = svg.onblur = null;
+    var tooltip = svg.parentElement.querySelector(".chart-tooltip");
+    if (tooltip) tooltip.hidden = true;
 
-    var W = 400, H = 140, padL = 44, padB = 18, padT = 8, padR = 8;
+    var W = Math.max(240, svg.clientWidth || 480), H = 180, padL = 66, padB = 24, padT = 12, padR = 12;
     svg.setAttribute("viewBox", "0 0 " + W + " " + H);
-    svg.setAttribute("preserveAspectRatio", "none");
+    svg.style.aspectRatio = W + " / " + H;
+    function node(tag, attrs, parent) {
+      var el = document.createElementNS(ns, tag);
+      Object.keys(attrs).forEach(function (k) { el.setAttribute(k, attrs[k]); });
+      (parent || svg).appendChild(el);
+      return el;
+    }
+    if (!series || !series.length) {
+      node("text", { x: W / 2, y: H / 2, "text-anchor": "middle" }).textContent = opts.emptyText || "No samples in this window";
+      return;
+    }
 
     var now = Math.floor(Date.now() / 1000);
     var tMin = opts.tMin != null ? opts.tMin : series[0].t;
@@ -40,54 +52,94 @@
 
     var vMin = Infinity, vMax = -Infinity;
     series.forEach(function (p) { vMin = Math.min(vMin, p.v); vMax = Math.max(vMax, p.v); });
-    if (vMin === vMax) { vMin -= 1; vMax += 1; }
-    var span = vMax - vMin;
-    vMin -= span * 0.06; vMax += span * 0.06;
+    var span = vMax - vMin || Math.max(vMax * 0.1, 1);
+    vMin = Math.max(0, vMin - span * 0.08);
+    vMax += span * 0.12;
+    if (opts.binary) { vMin = 0; vMax = 1; }
 
     function x(t) { return padL + (t - tMin) / (tMax - tMin) * (W - padL - padR); }
     function y(v) { return padT + (vMax - v) / (vMax - vMin) * (H - padT - padB); }
 
-    /* gridlines + y labels */
-    for (var g = 0; g <= 3; g++) {
-      var v = vMin + (vMax - vMin) * g / 3;
+    var ticks = opts.binary ? 1 : 3;
+    for (var g = 0; g <= ticks; g++) {
+      var v = vMin + (vMax - vMin) * g / ticks;
       var gy = y(v);
-      var line = document.createElementNS(ns, "line");
-      line.setAttribute("x1", padL); line.setAttribute("x2", W - padR);
-      line.setAttribute("y1", gy); line.setAttribute("y2", gy);
-      line.setAttribute("stroke", "#2a3442"); line.setAttribute("stroke-width", "1");
-      svg.appendChild(line);
-      var lbl = document.createElementNS(ns, "text");
-      lbl.setAttribute("x", padL - 4); lbl.setAttribute("y", gy + 3);
-      lbl.setAttribute("text-anchor", "end");
-      lbl.textContent = opts.fmt(v);
-      svg.appendChild(lbl);
+      node("line", { x1: padL, x2: W - padR, y1: gy, y2: gy, class: "gridline" });
+      node("text", { x: padL - 8, y: gy + 3, "text-anchor": "end" }).textContent = opts.binary ? (v ? "Yes" : "No") : opts.fmt(v);
     }
     /* x labels: tMin and tMax */
     [[x(tMin), fmtAgo(now - tMin)], [x(tMax), "now"]].forEach(function (p) {
-      var xl = document.createElementNS(ns, "text");
-      xl.setAttribute("x", p[0]); xl.setAttribute("y", H - 4);
-      xl.setAttribute("text-anchor", p[1] === "now" ? "end" : "start");
-      xl.textContent = p[1];
-      svg.appendChild(xl);
+      node("text", { x: p[0], y: H - 4, "text-anchor": p[1] === "now" ? "end" : "start" }).textContent = p[1];
     });
 
-    /* area + line path */
     var d = "";
     series.forEach(function (p, i) {
-      d += (i === 0 ? "M" : "L") + x(p.t).toFixed(1) + " " + y(p.v).toFixed(1);
+      var px = x(p.t), py = y(p.v);
+      if (!i) { d = "M" + px + " " + py; return; }
+      var prev = series[i - 1];
+      if (opts.binary) {
+        d += "H" + px + "V" + py;
+      } else {
+        // Horizontal control tangents soften the line without overshooting values.
+        var mid = (x(prev.t) + px) / 2;
+        d += "C" + mid + " " + y(prev.v) + " " + mid + " " + py + " " + px + " " + py;
+      }
     });
-    var area = document.createElementNS(ns, "path");
-    area.setAttribute("d", d + " L" + x(series[series.length - 1].t).toFixed(1) + " " + (H - padB) +
-      " L" + x(series[0].t).toFixed(1) + " " + (H - padB) + " Z");
-    area.setAttribute("fill", opts.color); area.setAttribute("opacity", "0.12");
-    svg.appendChild(area);
-    var path = document.createElementNS(ns, "path");
-    path.setAttribute("d", d);
-    path.setAttribute("fill", "none");
-    path.setAttribute("stroke", opts.color);
-    path.setAttribute("stroke-width", "1.5");
-    path.setAttribute("vector-effect", "non-scaling-stroke");
-    svg.appendChild(path);
+    var gradientID = "fill-" + svg.dataset.chart;
+    var gradient = node("linearGradient", { id: gradientID, x1: "0", y1: "0", x2: "0", y2: "1" }, node("defs", {}));
+    node("stop", { offset: "0%", "stop-color": opts.color, "stop-opacity": ".22" }, gradient);
+    node("stop", { offset: "100%", "stop-color": opts.color, "stop-opacity": ".01" }, gradient);
+    node("path", { d: d + "L" + x(series[series.length - 1].t) + " " + (H - padB) + "L" + x(series[0].t) + " " + (H - padB) + "Z", fill: "url(#" + gradientID + ")" });
+    node("path", { d: d, fill: "none", stroke: opts.color, "stroke-width": 1.8, "stroke-linecap": "round", "stroke-linejoin": "round", "vector-effect": "non-scaling-stroke" });
+    if (series.length === 1) node("circle", { cx: x(series[0].t), cy: y(series[0].v), r: 3, fill: opts.color });
+
+    var cursor = node("g", { visibility: "hidden", "aria-hidden": "true" });
+    var cross = node("line", { y1: padT, y2: H - padB, class: "crosshair" }, cursor);
+    var dot = node("circle", { r: 4, fill: opts.color, stroke: "var(--bg-card)", "stroke-width": 2 }, cursor);
+    var selected = series.length - 1;
+    var summary = svg.parentElement.querySelector(".chart-summary");
+    var summaryText;
+    function show(index, announce) {
+      selected = Math.max(0, Math.min(index, series.length - 1));
+      var p = series[selected], px = x(p.t);
+      cursor.setAttribute("visibility", "visible");
+      cross.setAttribute("x1", px); cross.setAttribute("x2", px);
+      dot.setAttribute("cx", px); dot.setAttribute("cy", y(p.v));
+      var text = new Date(p.t * 1000).toLocaleString() + " · " + (opts.binary ? (p.v ? "Yes" : "No") : opts.valueFmt(p.v));
+      if (tooltip) { tooltip.textContent = text; tooltip.hidden = false; }
+      if (announce && summary) {
+        if (summaryText == null) summaryText = summary.textContent;
+        summary.textContent = text;
+      }
+    }
+    function hide() {
+      cursor.setAttribute("visibility", "hidden");
+      if (tooltip) tooltip.hidden = true;
+      if (summaryText != null && summary) { summary.textContent = summaryText; summaryText = null; }
+    }
+    svg.onpointermove = function (ev) {
+      var point = svg.createSVGPoint();
+      point.x = ev.clientX; point.y = ev.clientY;
+      var px = point.matrixTransform(svg.getScreenCTM().inverse()).x;
+      var target = tMin + (px - padL) / (W - padL - padR) * (tMax - tMin);
+      var low = 0, high = series.length - 1;
+      while (low < high) {
+        var mid = Math.floor((low + high) / 2);
+        if (series[mid].t < target) low = mid + 1;
+        else high = mid;
+      }
+      if (low > 0 && target - series[low - 1].t < series[low].t - target) low--;
+      show(low, false);
+    };
+    svg.onpointerleave = hide;
+    svg.onfocus = function () { show(selected, true); };
+    svg.onblur = hide;
+    svg.onkeydown = function (ev) {
+      if (ev.key === "Escape") { hide(); return; }
+      if (["ArrowLeft", "ArrowRight", "Home", "End"].indexOf(ev.key) < 0) return;
+      ev.preventDefault();
+      show(ev.key === "Home" ? 0 : ev.key === "End" ? series.length - 1 : selected + (ev.key === "ArrowRight" ? 1 : -1), true);
+    };
   }
 
   /* summary formatters receive plain numbers (the plotted values) */
@@ -95,19 +147,19 @@
   function fmtPct(v) { return v.toFixed(1) + " %"; }
 
   var CHARTS = {
-    ping:     { title: "Ping latency (ms)", color: "#6fb6ff", fmt: function (v) { return v.toFixed(0); },
+    ping:     { title: "Ping latency (ms)", color: "#79b8ff", lightColor: "#286ec4", valueFmt: fmtMs, fmt: function (v) { return v.toFixed(0); },
                 pick: function (s) { return { t: s.ts, v: s.pingMs }; }, summary: function (a) { return avgSum(a, fmtMs); } },
     /* dropRate is a 0..1 fraction; plot it as a percentage */
-    drop:     { title: "Ping drop rate (%)", color: "#e05252", fmt: function (v) { return v.toFixed(1); },
+    drop:     { title: "Ping drop rate (%)", color: "#f28b99", lightColor: "#b42d40", valueFmt: fmtPct, fmt: function (v) { return v.toFixed(1); },
                 pick: function (s) { return { t: s.ts, v: s.dropRate * 100 }; }, summary: function (a) { return avgSum(a, fmtPct); } },
-    downlink: { title: "Downlink throughput", color: "#35b57a", fmt: fmtBytes,
+    downlink: { title: "Downlink throughput", color: "#73e0c1", lightColor: "#087b62", valueFmt: fmtBytes, fmt: fmtBytes,
                 pick: function (s) { return { t: s.ts, v: s.downBps }; }, summary: function (a) { return avgSum(a, fmtBytes); } },
-    uplink:   { title: "Uplink throughput", color: "#f5c211", fmt: fmtBytes,
+    uplink:   { title: "Uplink throughput", color: "#b8a4f4", lightColor: "#7452b4", valueFmt: fmtBytes, fmt: fmtBytes,
                 pick: function (s) { return { t: s.ts, v: s.upBps }; }, summary: function (a) { return avgSum(a, fmtBytes); } },
-    obstruction: { title: "Obstruction", color: "#e05252", fmt: function (v) { return v.toFixed(0); },
+    obstruction: { title: "Obstruction", color: "#f28b99", lightColor: "#b42d40", binary: true, fmt: function (v) { return v.toFixed(0); },
                 pick: function (s) { return { t: s.ts, v: s.obstructed ? 1 : 0 }; },
                 summary: function (a) { return fractionSummary(a, "of samples obstructed"); } },
-    scheduled: { title: "Scheduled (boresight) windows", color: "#f5a33d", fmt: function (v) { return v.toFixed(0); },
+    scheduled: { title: "Scheduled (boresight) windows", color: "#f2c574", lightColor: "#8b580c", binary: true, fmt: function (v) { return v.toFixed(0); },
                 pick: function (s) { return { t: s.ts, v: s.scheduled ? 1 : 0 }; },
                 summary: function (a) { return fractionSummary(a, "of samples scheduled"); } }
   };
@@ -157,17 +209,43 @@
     return sel ? sel.getAttribute("data-window") : "1h";
   }
 
+  var historyRequest = 0;
+  var chartCache = {};
+  function renderHistoryChart(key, series, tMin) {
+    var svg = document.querySelector('svg[data-chart="' + key + '"]');
+    var chart = CHARTS[key];
+    if (svg) drawChart(svg, series, {
+      color: document.documentElement.dataset.theme === "light" ? chart.lightColor : chart.color,
+      fmt: chart.fmt, valueFmt: chart.valueFmt, binary: chart.binary, tMin: tMin
+    });
+  }
+
   function loadHistory(deviceId, win) {
+    var request = ++historyRequest;
     var names = Object.keys(CHARTS);
+    chartCache = {};
+    names.forEach(function (key) {
+      var svg = document.querySelector('svg[data-chart="' + key + '"]');
+      var sum = document.querySelector('[data-chart-summary="' + key + '"]');
+      if (svg) { svg.setAttribute("aria-busy", "true"); drawChart(svg, [], { emptyText: "Loading history…" }); }
+      if (sum) sum.textContent = "Loading history…";
+    });
     fetchJSON("/api/device/" + deviceId + "/history?window=" + encodeURIComponent(win))
       .then(function (r) {
-        if (!r.ok) return;
+        if (request !== historyRequest) return;
         var samples = r.body.samples || [];
         names.forEach(function (key) {
           var svg = document.querySelector('svg[data-chart="' + key + '"]');
           var sum = document.querySelector('[data-chart-summary="' + key + '"]');
+          if (svg) svg.setAttribute("aria-busy", "false");
+          if (!r.ok) {
+            if (svg) drawChart(svg, [], { emptyText: "History unavailable" });
+            if (sum) sum.textContent = "Could not load history. Select a window to retry.";
+            return;
+          }
           var series = samples.map(CHARTS[key].pick).filter(function (p) { return p.v != null && isFinite(p.v); });
-          if (svg) drawChart(svg, series, { color: CHARTS[key].color, fmt: CHARTS[key].fmt, tMin: r.body.tMin });
+          chartCache[key] = { series: series, tMin: r.body.tMin };
+          renderHistoryChart(key, series, r.body.tMin);
           if (sum) sum.textContent = CHARTS[key].summary(series.map(function (p) { return p.v; })).replace("{v}", "");
         });
       });
@@ -175,22 +253,33 @@
 
   function loadSummary() {
     fetchJSON("/api/summary").then(function (r) {
-      if (!r.ok) return;
       var info = document.querySelector("[data-poll-info]");
+      if (!r.ok) {
+        if (info) info.textContent = "Refresh unavailable · showing last known status";
+        return;
+      }
       if (info) {
         var d = r.body;
-        info.textContent = (d.sessionDead ? "⚠ session invalid · " : "") +
-          (d.devices || []).length + " device(s) · refreshed " + fmtAgo((Date.now() / 1000) - d.updatedAt);
+        info.textContent = (d.sessionDead ? "Session invalid · " : "") +
+          "Status refreshed " + fmtAgo((Date.now() / 1000) - d.updatedAt) + " · every 30s";
       }
+      var counts = { total: 0, online: 0, degraded: 0, offline: 0 };
       (r.body.devices || []).forEach(function (dev) {
-        var root = document.querySelector('[data-device-id="' + dev.id + '"]');
+        var healthClass = dev.onlineClass;
+        var healthLabel = dev.onlineLabel;
+        if (healthClass === "pill-ok" && ((dev.alerts || []).length || dev.obstructionClass === "pill-warn" || dev.obstructionClass === "pill-error")) {
+          healthClass = "pill-warn"; healthLabel = "degraded";
+        }
+        counts.total++;
+        counts[healthClass === "pill-ok" ? "online" : healthClass === "pill-warn" ? "degraded" : "offline"]++;
+        var root = Array.from(document.querySelectorAll(".device-card")).find(function (card) { return card.dataset.deviceId === dev.id; });
         if (!root) return;
         if (dev.onlineLabel != null) {
           var pill = root.querySelector('[data-field="online"]');
-          if (pill) { pill.textContent = dev.onlineLabel; pill.className = "pill " + dev.onlineClass; }
+          if (pill) { pill.textContent = healthLabel; pill.className = "pill " + healthClass; }
         }
         ["state", "snr", "obstruction", "versions", "alerts", "updated"].forEach(function (f) {
-          if (dev[f] == null) return;
+          if (dev[f] == null && f !== "alerts") return;
           var el = root.querySelector('[data-field="' + f + '"]');
           if (!el) return;
           if (f === "alerts") {
@@ -203,6 +292,19 @@
             el.textContent = dev[f];
           }
         });
+        // Count the current roster; card inventory is a server-rendered snapshot.
+        var grid = document.getElementById("device-grid");
+        if (grid) {
+          var cards = grid.querySelectorAll(".device-card");
+          var ids = (r.body.devices || []).map(function (dev) { return dev.id; });
+          var sameRoster = cards.length === ids.length && Array.from(cards).every(function (card) { return ids.indexOf(card.dataset.deviceId) >= 0; });
+          if (sameRoster) {
+            Object.keys(counts).forEach(function (key) {
+              var el = document.querySelector('[data-count="' + key + '"]');
+              if (el) el.textContent = counts[key];
+            });
+          } else if (info) info.textContent = "Device roster changed · reload to update the inventory";
+        }
       });
     });
   }
@@ -284,14 +386,46 @@
 
   /* ---------- init per page ---------- */
   document.addEventListener("DOMContentLoaded", function () {
+    var themeButton = document.querySelector("[data-theme-toggle]");
+    function updateThemeButton() {
+      var light = document.documentElement.dataset.theme === "light";
+      themeButton.textContent = light ? "Dark mode" : "Light mode";
+      themeButton.setAttribute("aria-label", "Switch to " + (light ? "dark" : "light") + " theme");
+      themeButton.setAttribute("aria-pressed", String(light));
+    }
+    if (themeButton) {
+      themeButton.hidden = false;
+      updateThemeButton();
+      themeButton.addEventListener("click", function () {
+        var theme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+        document.documentElement.dataset.theme = theme;
+        try { localStorage.setItem("ffmuc-theme", theme); } catch (_) {}
+        updateThemeButton();
+        Object.keys(chartCache).forEach(function (key) { renderHistoryChart(key, chartCache[key].series, chartCache[key].tMin); });
+      });
+    }
     var charts = document.querySelectorAll("svg[data-chart]");
+    if (typeof ResizeObserver !== "undefined") {
+      var widths = new WeakMap();
+      var observer = new ResizeObserver(function (entries) {
+        entries.forEach(function (entry) {
+          var svg = entry.target, width = Math.round(entry.contentRect.width);
+          if (widths.get(svg) === width) return;
+          widths.set(svg, width);
+          var cached = chartCache[svg.dataset.chart];
+          if (cached) renderHistoryChart(svg.dataset.chart, cached.series, cached.tMin);
+        });
+      });
+      charts.forEach(function (svg) { observer.observe(svg); });
+    }
     var deviceId = charts.length ? charts[0].getAttribute("data-device-id") : null;
     if (deviceId) {
       loadHistory(deviceId, currentWindow());
       document.querySelectorAll("button[data-window]").forEach(function (b) {
         b.addEventListener("click", function () {
-          document.querySelectorAll("button[data-window]").forEach(function (x) { x.classList.remove("btn-selected"); });
+          document.querySelectorAll("button[data-window]").forEach(function (x) { x.classList.remove("btn-selected"); x.setAttribute("aria-pressed", "false"); });
           b.classList.add("btn-selected");
+          b.setAttribute("aria-pressed", "true");
           loadHistory(deviceId, b.getAttribute("data-window"));
         });
       });
