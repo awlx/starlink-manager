@@ -107,15 +107,17 @@ func (g *Gateway) PruneMutationLocks(liveTargets map[string]struct{}) {
 func (g *Gateway) Handle(ctx context.Context, req *device.Request) (*device.Response, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		resp, err := g.handleOnce(ctx, req)
+		resp, usedTok, err := g.handleOnce(ctx, req)
 		if err == nil {
 			return resp, nil
 		}
 		var st *grpcStatusError
 		if errors.As(err, &st) && st.code == 16 && attempt < 2 {
-			// Token expired mid-call: force a session refresh and retry.
+			// Token expired mid-call: refresh the session and retry.
+			// Parallel pollers that were rejected with the same token
+			// share one refresh instead of re-minting in turn.
 			g.log.Info("device gateway returned unauthenticated, refreshing session")
-			if _, terr := g.session.Refresh(ctx); terr != nil {
+			if _, terr := g.session.RefreshStale(ctx, usedTok); terr != nil {
 				return nil, terr
 			}
 			lastErr = err
@@ -126,11 +128,19 @@ func (g *Gateway) Handle(ctx context.Context, req *device.Request) (*device.Resp
 	return nil, lastErr
 }
 
-func (g *Gateway) handleOnce(ctx context.Context, req *device.Request) (*device.Response, error) {
+// handleOnce performs one gateway call and also reports the access token
+// it sent, so an unauthenticated answer can be tied to that token.
+func (g *Gateway) handleOnce(ctx context.Context, req *device.Request) (*device.Response, string, error) {
 	// Every gateway call needs the session cookie plus access token.
 	if err := g.session.Ensure(ctx); err != nil {
-		return nil, err
+		return nil, "", err
 	}
+	tok := g.session.currentToken()
+	resp, err := g.send(ctx, req, tok)
+	return resp, tok, err
+}
+
+func (g *Gateway) send(ctx context.Context, req *device.Request, tok string) (*device.Response, error) {
 	payload, err := proto.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("%w: marshaling request: %v", ErrGateway, err)
@@ -147,7 +157,7 @@ func (g *Gateway) handleOnce(ctx context.Context, req *device.Request) (*device.
 	httpReq.Header.Set("X-User-Agent", "okhttp/4.9.2")
 	httpReq.Header.Set("Origin", g.webBase)
 	httpReq.Header.Set("Accept", "application/grpc-web+proto")
-	if tok := g.session.currentToken(); tok != "" {
+	if tok != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+tok)
 	}
 	// The device gateway is a Bearer-only endpoint: cookies must not ride

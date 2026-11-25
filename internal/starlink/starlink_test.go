@@ -633,6 +633,65 @@ func TestGatewayRetryOnUnauthenticated(t *testing.T) {
 	}
 }
 
+func TestGatewayConcurrentUnauthenticatedSharesRefresh(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	clock := &fakeClock{now: time.Now()}
+	s := newTestSession(t, ts, clock)
+	if _, err := s.Token(context.Background()); err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	g := NewGateway(s, ts.URL, ts.Client(), nil)
+	f.mu.Lock()
+	base := f.tokenRenewed
+	f.mu.Unlock()
+
+	// The first wave of parallel calls is rejected together, as happens
+	// when a token expires during a poll round.
+	const workers = 4
+	var arrived int32
+	release := make(chan struct{})
+	var once sync.Once
+	var mu sync.Mutex
+	f.mu.Lock()
+	f.handleFn = func(req *device.Request) (*device.Response, int32, string) {
+		mu.Lock()
+		arrived++
+		n := arrived
+		mu.Unlock()
+		if n <= workers {
+			if n == workers {
+				once.Do(func() { close(release) })
+			}
+			<-release
+			return &device.Response{}, 16, "unauthenticated"
+		}
+		return &device.Response{Response: &device.Response_Reboot{Reboot: &device.RebootResponse{}}}, 0, ""
+	}
+	f.mu.Unlock()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs <- g.Reboot(context.Background(), KindDish, fmt.Sprintf("dev%d", i))
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Reboot after shared re-auth: %v", err)
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if got := f.tokenRenewed - base; got != 1 {
+		t.Fatalf("token renewals = %d, want 1 shared by %d rejected calls", got, workers)
+	}
+}
+
 func TestStoreHistoryDedupeAndPersistence(t *testing.T) {
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Unix(1_800_000_000, 0)}

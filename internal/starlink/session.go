@@ -264,6 +264,20 @@ func (s *Session) Refresh(ctx context.Context) (string, error) {
 	return s.ensureTokenLocked(ctx)
 }
 
+// RefreshStale is Refresh for a caller that was rejected while using
+// stale: when another caller already replaced that token with a fresh one,
+// the fresh token is returned without minting again.
+func (s *Session) RefreshStale(ctx context.Context, stale string) (string, error) {
+	s.mu.Lock()
+	if s.token != "" && s.token != stale && s.now().Sub(s.tokenAt) < tokenFreshFor {
+		tok := s.token
+		s.mu.Unlock()
+		return tok, nil
+	}
+	s.mu.Unlock()
+	return s.Refresh(ctx)
+}
+
 // ensureTokenLocked must be called with s.mu held. It serializes minting so
 // concurrent callers share a single probe (single-flight), and enforces the
 // 60s minimum probe interval.
