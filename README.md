@@ -58,9 +58,9 @@ no build tooling for the UI, and no runtime CDN or font requests.
 - Fields the dish firmware sometimes omits (software version, uptime,
   signal quality) fall back to the cloud telemetry enrichment stored per
   device; the gateway snapshot always wins when it reports a value.
-- Devices that disappear from the account roster are pruned after a
-  successful roster refresh, so removed hardware stops being polled and
-  rendered.
+- Devices that disappear from the account roster are marked retired and
+  stop being polled; they are pruned after a 24-hour grace period, so kit
+  swaps keep their history available until the replacement settles in.
 - If the account session becomes invalid (cookie rejected), the app latches
   a "session dead" state after repeated failures and stops polling, but it
   retries automatically after a 10-minute cooldown and recovers as soon as

@@ -48,25 +48,62 @@ func TestStorePruneDevices(t *testing.T) {
 	store.UpsertDevice(&Device{ID: "ut2", Kind: KindDish, Name: "b", Active: true})
 	store.UpsertDevice(&Device{ID: "r1", Kind: KindRouter, Name: "c", Active: true})
 
+	// Departure marks retirement with a grace period; nothing is removed yet.
 	removed := store.PruneDevices(map[string]struct{}{"ut1": {}, "r1": {}})
-	if len(removed) != 1 || removed[0] != "ut2" {
-		t.Fatalf("removed = %v, want [ut2]", removed)
+	if len(removed) != 0 {
+		t.Fatalf("removed = %v on first prune, want none (grace period)", removed)
 	}
 	ids := map[string]bool{}
+	var ut2 *Device
 	for _, d := range store.Devices() {
 		ids[d.ID] = true
+		if d.ID == "ut2" {
+			ut2 = d
+		}
 	}
-	if ids["ut2"] {
-		t.Fatal("pruned device still present")
+	if !ids["ut2"] {
+		t.Fatal("departed device must stay during the grace period")
+	}
+	if ut2 == nil || ut2.Retired == nil {
+		t.Fatal("departed device must be marked retired")
 	}
 	if !ids["ut1"] || !ids["r1"] {
 		t.Fatal("live devices must survive pruning")
 	}
-	// An empty live set must not wipe the registry (caller guards, but
-	// the store itself only removes what is absent).
+	// A returning device clears its retirement.
+	store.UpsertDevice(&Device{ID: "ut2", Kind: KindDish, Name: "b", Active: true})
+	_ = store.PruneDevices(map[string]struct{}{"ut1": {}, "r1": {}, "ut2": {}})
+	for _, d := range store.Devices() {
+		if d.ID == "ut2" && d.Retired != nil {
+			t.Fatal("returning device must be un-retired")
+		}
+	}
+	// After the grace period expires the device is pruned.
+	expired := store.PruneDevices(map[string]struct{}{"ut1": {}, "r1": {}})
+	if len(expired) != 0 {
+		t.Fatalf("expired = %v, want none before grace expiry", expired)
+	}
+	for _, d := range store.Devices() {
+		if d.ID == "ut2" {
+			// Force the retire timestamp to the past to simulate expiry.
+			past := time.Now().Add(-retireGracePeriod - time.Minute)
+			store.mu.Lock()
+			if inner, ok := store.devices["ut2"]; ok {
+				inner.Retired = &past
+			}
+			store.mu.Unlock()
+			break
+		}
+	}
+	removed = store.PruneDevices(map[string]struct{}{"ut1": {}, "r1": {}})
+	if len(removed) != 1 || removed[0] != "ut2" {
+		t.Fatalf("removed = %v, want [ut2] after grace expiry", removed)
+	}
+	// An empty live set must not wipe the registry immediately (caller
+	// guards, but the store only retires first).
 	removed = store.PruneDevices(map[string]struct{}{})
-	if len(removed) != 2 {
-		t.Fatalf("removed = %v, want ut1+r1", removed)
+	if len(removed) != 0 {
+		t.Fatalf("removed = %v on empty live set, want none yet", removed)
 	}
 }
 

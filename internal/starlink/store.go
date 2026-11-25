@@ -65,6 +65,10 @@ type Device struct {
 	DishSerial  string     `json:"dishSerial,omitempty"`
 	ServiceLine string     `json:"serviceLine,omitempty"`
 	Active      bool       `json:"active"`
+	// Retired marks a device that left the account roster. It is pruned
+	// after the grace period so kit swaps keep their history available.
+	Retired   *time.Time `json:"retired,omitempty"`
+	RetiredAt time.Time  `json:"retiredAt,omitempty"`
 
 	Status    *DeviceStatus  `json:"status,omitempty"`
 	Cursor    int64          `json:"cursor,omitempty"` // dish history sample counter consumed last
@@ -385,21 +389,41 @@ func (s *Store) AppendHistory(id string, hist *device.DishGetHistoryResponse) in
 	return added
 }
 
-// PruneDevices removes devices whose IDs are absent from the given live
-// set and reports the removed IDs. It is called after a successful roster
-// fetch so devices removed from the account stop being polled and
-// rendered instead of lingering as unreachable ghosts.
+// retireGracePeriod keeps departed devices (and their history) visible for
+// one day after they leave the roster, then prunes them. This covers kit
+// swaps where a terminal disappears briefly and comes back with the same ID.
+const retireGracePeriod = 24 * time.Hour
+
+// PruneDevices marks devices whose IDs are absent from the given live set
+// as retired and reports those pruned after the grace period. It is called
+// after a successful roster fetch so devices removed from the account stop
+// being polled instead of lingering as unreachable ghosts, while recent
+// leavers stay renderable for reference.
 func (s *Store) PruneDevices(live map[string]struct{}) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var removed []string
-	for id := range s.devices {
+	for id, d := range s.devices {
 		if _, ok := live[id]; ok {
+			if d.Retired != nil {
+				d.Retired = nil
+				d.RetiredAt = time.Time{}
+				s.dirty = true
+			}
 			continue
 		}
-		delete(s.devices, id)
-		removed = append(removed, id)
-		s.dirty = true
+		if d.Retired == nil {
+			now := s.now()
+			d.Retired = &now
+			d.RetiredAt = now
+			s.dirty = true
+			continue
+		}
+		if s.now().Sub(*d.Retired) >= retireGracePeriod {
+			delete(s.devices, id)
+			removed = append(removed, id)
+			s.dirty = true
+		}
 	}
 	return removed
 }

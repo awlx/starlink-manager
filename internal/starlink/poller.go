@@ -266,8 +266,17 @@ func (p *Poller) Tick() error {
 		}
 	}
 
-	// 3. Poll every device through the gateway: status + history.
-	p.pollDevices(p.store.Devices())
+	// 3. Poll every device through the gateway: status + history. Devices
+	// retired from the roster keep their last state until pruned but are
+	// no longer polled.
+	devs := p.store.Devices()
+	pollable := make([]*Device, 0, len(devs))
+	for _, d := range devs {
+		if d.Retired == nil {
+			pollable = append(pollable, d)
+		}
+	}
+	p.pollDevices(pollable)
 	return nil
 }
 
