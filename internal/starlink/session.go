@@ -252,6 +252,16 @@ func (s *Session) applyTokenLocked(tok string, at time.Time) {
 	}})
 }
 
+// WithPresetToken seeds the session with an externally minted access token
+// (STARLINK_SESSION_TOKEN). Renewal still happens through the normal flow
+// once the preset token ages out.
+func (s *Session) WithPresetToken(tok string) *Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applyTokenLocked(tok, s.now())
+	return s
+}
+
 // probeLocked performs the session probe: GET /auth-rp/auth/user with the
 // SSO cookie. The response contains the account JSON and sets the short-
 // lived access token cookie.
