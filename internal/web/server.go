@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -79,6 +80,22 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+	// Browsers request /favicon.ico even for SVG icons; serve the
+	// embedded SVG there with the right content type.
+	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		data, err := staticFS.Open("favicon.svg")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer data.Close()
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		if rs, ok := data.(io.ReadSeeker); ok {
+			_, _ = rs.Seek(0, io.SeekStart)
+		}
+		_, _ = io.Copy(w, data)
+	})
 	mux.Handle("GET /api/device/{$}", http.NotFoundHandler())
 
 	s.auth.Routes(mux)
@@ -268,6 +285,13 @@ func (s *Server) deviceView(d *starlink.Device, now time.Time) DeviceView {
 		v.ObstructionClass = obstructionClass(st)
 		v.ObstructionBarPct = obstructionBarPct(st.ObstructionFraction)
 		v.VersionsText = strings.TrimSpace(st.SoftwareVersion + " / " + st.HardwareVersion)
+		if v.VersionsText == "/" {
+			// The dish firmware sometimes omits the software version;
+			// fall back to the cloud telemetry enrichment.
+			if sv := telemetryString(d.Telemetry, "softwareVersion"); sv != "" {
+				v.VersionsText = sv
+			}
+		}
 		v.Alerts = activeAlerts(st.Alerts)
 	}
 	if v.StateLabel == "" {
@@ -447,9 +471,11 @@ func (s *Server) statusRows(d *starlink.Device) []statusRow {
 		}
 	} else {
 		add("State", "state", orDash(st.State))
-		add("Software version", "versions", orDash(st.SoftwareVersion))
+		add("Software version", "versions",
+			orDash(firstNonEmpty(st.SoftwareVersion, telemetryString(d.Telemetry, "softwareVersion"))))
 		add("Hardware version", "hw", orDash(st.HardwareVersion))
 		add("SNR", "snr", snrText(st.SNR))
+		add("Signal quality", "signalQuality", orDash(telemetryQualityText(d.Telemetry)))
 		add("Ping latency", "ping", orDash(msText(st.PopPingLatencyMs)))
 		add("Ping drop rate", "drop", orDash(pctText(st.PopPingDropRate)))
 		add("Downlink", "down", orDash(bpsText(st.DownlinkThroughput)))
@@ -459,7 +485,7 @@ func (s *Server) statusRows(d *starlink.Device) []statusRow {
 		add("Obstructed (last 24h)", "obstruction24h", orDash(secondsText(st.ObstructionLast24hS)))
 		add("Scheduled (last sample)", "scheduledFlag", yesNo(s.lastScheduled(d)))
 		add("Stow requested", "stow", yesNo(st.StowRequested))
-		add("Uptime", "uptime", orDash(durationText(st.UptimeS)))
+		add("Uptime", "uptime", orDash(uptimeText(st, d.Telemetry)))
 		if alerts := activeAlerts(st.Alerts); len(alerts) > 0 {
 			add("Alerts", "alerts", strings.Join(alerts, ", "))
 		}
@@ -473,6 +499,55 @@ func orDash(s string) string {
 		return "—"
 	}
 	return s
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// telemetryString reads a string field from the cloud telemetry enrichment
+// map stored per device.
+func telemetryString(tm map[string]any, key string) string {
+	if tm == nil {
+		return ""
+	}
+	if v, ok := tm[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// telemetryQualityText renders the signal quality from the telemetry
+// enrichment (0..1 scale).
+func telemetryQualityText(tm map[string]any) string {
+	if tm == nil {
+		return ""
+	}
+	v, ok := tm["signalQuality"].(float64)
+	if !ok || v <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%.2f", v)
+}
+
+// uptimeText prefers the gateway-reported uptime and falls back to the
+// telemetry enrichment value (cloud-only devices).
+func uptimeText(st *starlink.DeviceStatus, tm map[string]any) string {
+	if st.UptimeS > 0 {
+		return durationText(st.UptimeS)
+	}
+	if tm == nil {
+		return ""
+	}
+	if v, ok := tm["uptimeSeconds"].(float64); ok && v > 0 {
+		return durationText(uint64(v))
+	}
+	return ""
 }
 func msText(v float64) string  { return fmt.Sprintf("%.0f ms", v) }
 func pctText(v float64) string { return fmt.Sprintf("%.1f %%", v*100) }
@@ -645,6 +720,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		window = dur
 	}
 	samples := s.store.History(d.ID, window)
+	samples = downsampleSamples(samples, maxChartBuckets)
 	out := make([]apiSample, 0, len(samples))
 	var tMin int64
 	for i, smp := range samples {
@@ -666,6 +742,50 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		"tMin":    tMin,
 		"count":   len(out),
 	})
+}
+
+// maxChartBuckets caps the chart points a history response carries; larger
+// windows are server-side averaged so responses stay small.
+const maxChartBuckets = 2000
+
+// downsampleSamples averages consecutive samples into at most maxBuckets
+// buckets. Bool flags (obstructed/scheduled) stay true when any sample in
+// the bucket was flagged, so short events survive averaging.
+func downsampleSamples(samples []starlink.Sample, maxBuckets int) []starlink.Sample {
+	if len(samples) <= maxBuckets || maxBuckets <= 0 {
+		return samples
+	}
+	bucket := (len(samples) + maxBuckets - 1) / maxBuckets
+	out := make([]starlink.Sample, 0, (len(samples)+bucket-1)/bucket)
+	for start := 0; start < len(samples); start += bucket {
+		end := start + bucket
+		if end > len(samples) {
+			end = len(samples)
+		}
+		agg := samples[start]
+		n := end - start
+		agg.PopPingLatencyMs = 0
+		agg.PopPingDropRate = 0
+		agg.DownlinkThroughputBps = 0
+		agg.UplinkThroughputBps = 0
+		agg.SNR = 0
+		for _, smp := range samples[start:end] {
+			agg.PopPingLatencyMs += smp.PopPingLatencyMs
+			agg.PopPingDropRate += smp.PopPingDropRate
+			agg.DownlinkThroughputBps += smp.DownlinkThroughputBps
+			agg.UplinkThroughputBps += smp.UplinkThroughputBps
+			agg.SNR += smp.SNR
+			agg.Obstructed = agg.Obstructed || smp.Obstructed
+			agg.Scheduled = agg.Scheduled || smp.Scheduled
+		}
+		agg.PopPingLatencyMs /= float64(n)
+		agg.PopPingDropRate /= float64(n)
+		agg.DownlinkThroughputBps /= float64(n)
+		agg.UplinkThroughputBps /= float64(n)
+		agg.SNR /= float64(n)
+		out = append(out, agg)
+	}
+	return out
 }
 
 // apiSample is the JSON shape of one history point. The timestamp is unix

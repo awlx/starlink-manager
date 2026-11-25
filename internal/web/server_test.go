@@ -541,3 +541,63 @@ func TestSummaryEmptyDeviceListIsArray(t *testing.T) {
 		t.Errorf("summary without devices = %s, want devices:[]", body)
 	}
 }
+
+func TestFaviconServed(t *testing.T) {
+	_, ts := newTestServer(t)
+	resp, err := http.Get(ts.URL + "/favicon.ico")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("favicon status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "image/svg+xml" {
+		t.Errorf("favicon content type = %q", ct)
+	}
+	if body := readAll(t, resp); !strings.Contains(body, "<svg") {
+		t.Error("favicon body is not an SVG")
+	}
+}
+
+func TestDownsampleSamples(t *testing.T) {
+	samples := make([]starlink.Sample, 5000)
+	for i := range samples {
+		samples[i] = starlink.Sample{Ts: time.Unix(int64(i), 0), PopPingLatencyMs: 40}
+	}
+	got := downsampleSamples(samples, maxChartBuckets)
+	if len(got) > maxChartBuckets {
+		t.Fatalf("downsampled to %d buckets, want <= %d", len(got), maxChartBuckets)
+	}
+	// Small inputs pass through unchanged.
+	if got := downsampleSamples(samples[:10], maxChartBuckets); len(got) != 10 {
+		t.Fatalf("small input changed: %d", len(got))
+	}
+}
+
+func TestTelemetryFallbacksInStatusRows(t *testing.T) {
+	srv, ts := newTestServer(t)
+	d := seedDevice(t, srv.store)
+	// Wipe the gateway-reported fields so the telemetry fallbacks show.
+	if dev, ok := srv.store.Device(d.ID); ok {
+		dev.Status.SoftwareVersion = ""
+		dev.Status.UptimeS = 0
+		srv.store.SetStatus(dev.ID, dev.Status)
+		srv.store.SetTelemetry(dev.ID, map[string]any{
+			"softwareVersion": "2025.01.10.cloud",
+			"uptimeSeconds":   float64(7200),
+			"signalQuality":   float64(0.8),
+		})
+	}
+	resp, err := http.Get(ts.URL + "/device/ut1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readAll(t, resp)
+	for _, want := range []string{"2025.01.10.cloud", "2h0m0s", "0.80"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("device page missing telemetry fallback %q", want)
+		}
+	}
+}
