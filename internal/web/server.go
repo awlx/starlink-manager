@@ -450,14 +450,20 @@ var historyWindows = []struct {
 }
 
 func availableWindows(cfgWindow time.Duration) []windowOpt {
-	var out []windowOpt
+	// Every window is offered so users can always see the full choice;
+	// requests beyond the configured history window are clamped by the
+	// server, which is honest about what data exists.
+	out := make([]windowOpt, 0, len(historyWindows))
+	// The largest window actually backed by stored data is the default
+	// selection.
+	sel := ""
 	for _, w := range historyWindows {
 		if w.Value <= cfgWindow {
-			out = append(out, windowOpt{Label: w.Label, Value: w.Value.String()})
+			sel = w.Value.String()
 		}
 	}
-	if len(out) > 0 {
-		out[len(out)-1].Selected = true
+	for _, w := range historyWindows {
+		out = append(out, windowOpt{Label: w.Label, Value: w.Value.String(), Selected: w.Value.String() == sel})
 	}
 	return out
 }

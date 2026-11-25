@@ -821,3 +821,47 @@ func TestEthernetAlertRendersAsWarningPill(t *testing.T) {
 		}
 	}
 }
+
+func TestAvailableWindowsAlwaysShownAndClamped(t *testing.T) {
+	// With the default 24h window, 15m is the default selection (largest
+	// fully-backed window selection stays stable) and all windows render.
+	ws := availableWindows(24 * time.Hour)
+	if len(ws) != 5 {
+		t.Fatalf("windows = %d, want 5 (always shown)", len(ws))
+	}
+	for _, w := range ws {
+		if w.Label == "" || w.Value == "" {
+			t.Errorf("window %v missing label/value", w)
+		}
+	}
+
+	// A small configured window still lists every button; the selection
+	// marks the largest window the config actually backs.
+	ws = availableWindows(1 * time.Hour)
+	if len(ws) != 5 {
+		t.Fatalf("windows = %d, want 5 for a 1h config", len(ws))
+	}
+	var selected int
+	for _, w := range ws {
+		if w.Selected {
+			selected++
+			if w.Value != "1h0m0s" {
+				t.Errorf("selected window = %q, want 1h0m0s", w.Value)
+			}
+		}
+	}
+	if selected != 1 {
+		t.Fatalf("selected windows = %d, want 1", selected)
+	}
+
+	// A config below the smallest window selects nothing and shows all.
+	ws = availableWindows(5 * time.Minute)
+	if len(ws) != 5 {
+		t.Fatalf("windows = %d, want 5", len(ws))
+	}
+	for _, w := range ws {
+		if w.Selected {
+			t.Errorf("window %q selected though not backed by config", w.Value)
+		}
+	}
+}
