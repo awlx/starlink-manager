@@ -148,7 +148,8 @@ func (a *OIDCAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Name:   stringClaim(claims, "name"),
 		Groups: groups,
 		Admin:  a.admin.IsAdmin(claims[a.claim]),
-		Exp:    idToken.Expiry.Unix(),
+		// Exp stays 0 so the session lasts SessionTTL: Keycloak ID tokens
+		// expire after minutes, which logged users out almost immediately.
 	}
 	if err := setSessionCookie(w, a.cookies, u); err != nil {
 		http.Error(w, "login failed (session issue)", http.StatusInternalServerError)
