@@ -6,8 +6,7 @@
     if (!isFinite(bps) || bps <= 0) return "0 bps";
     var units = ["bps", "Kbps", "Mbps", "Gbps"];
     var i = 0;
-    while (bps >= 1e6 && i < units.length - 1) { bps /= 1e6; i++; }
-    if (i > 0 && bps >= 1e3) { bps /= 1e3; i++; }
+    while (bps >= 1000 && i < units.length - 1) { bps /= 1000; i++; }
     return bps.toFixed(bps >= 100 ? 0 : 1) + " " + units[i];
   }
 
@@ -91,15 +90,20 @@
     svg.appendChild(path);
   }
 
+  /* summary formatters receive plain numbers (the plotted values) */
+  function fmtMs(v) { return v.toFixed(0) + " ms"; }
+  function fmtPct(v) { return v.toFixed(1) + " %"; }
+
   var CHARTS = {
     ping:     { title: "Ping latency (ms)", color: "#6fb6ff", fmt: function (v) { return v.toFixed(0); },
-                pick: function (s) { return { t: s.ts, v: s.pingMs }; }, summary: function (a) { return avgSum(a, function (s) { return s.pingMs.toFixed(0) + " ms"; }); } },
+                pick: function (s) { return { t: s.ts, v: s.pingMs }; }, summary: function (a) { return avgSum(a, fmtMs); } },
+    /* dropRate is a 0..1 fraction; plot it as a percentage */
     drop:     { title: "Ping drop rate (%)", color: "#e05252", fmt: function (v) { return v.toFixed(1); },
-                pick: function (s) { return { t: s.ts, v: s.dropRate }; }, summary: function (a) { return avgSum(a, function (s) { return s.dropRate.toFixed(1) + "% dropped"; }); } },
+                pick: function (s) { return { t: s.ts, v: s.dropRate * 100 }; }, summary: function (a) { return avgSum(a, fmtPct); } },
     downlink: { title: "Downlink throughput", color: "#35b57a", fmt: fmtBytes,
-                pick: function (s) { return { t: s.ts, v: s.downBps }; }, summary: function (a) { return avgSum(a, function (s) { return fmtBytes(s.downBps); }); } },
+                pick: function (s) { return { t: s.ts, v: s.downBps }; }, summary: function (a) { return avgSum(a, fmtBytes); } },
     uplink:   { title: "Uplink throughput", color: "#f5c211", fmt: fmtBytes,
-                pick: function (s) { return { t: s.ts, v: s.upBps }; }, summary: function (a) { return avgSum(a, function (s) { return fmtBytes(s.upBps); }); } },
+                pick: function (s) { return { t: s.ts, v: s.upBps }; }, summary: function (a) { return avgSum(a, fmtBytes); } },
     obstruction: { title: "Obstruction", color: "#e05252", fmt: function (v) { return v.toFixed(0); },
                 pick: function (s) { return { t: s.ts, v: s.obstructed ? 1 : 0 }; },
                 summary: function (a) { return fractionSummary(a, "of samples obstructed"); } },
@@ -118,22 +122,34 @@
   function avgSum(arr, fmt) {
     if (!arr.length) return "no samples";
     var s = 0;
-    arr.forEach(function (p) { s += p.v; });
-    return fmt(arr[Math.floor(arr.length / 2)]) + " · avg " + fmt(s / arr.length);
+    arr.forEach(function (v) { s += v; });
+    return "latest " + fmt(arr[arr.length - 1]) + " · avg " + fmt(s / arr.length);
   }
 
   /* ---------- helpers ---------- */
+  /* Resolve to {ok, status, body}; non-JSON replies (auth redirects, proxy
+     errors, plain-text 403s) and network failures become {error: ...}. */
+  function toResult(r) {
+    return r.text().then(function (t) {
+      var body;
+      try { body = JSON.parse(t); } catch (e) { body = { error: (t || r.statusText || "HTTP " + r.status).trim().slice(0, 200) }; }
+      if (body == null || typeof body !== "object") body = { error: "unexpected response" };
+      return { ok: r.ok, status: r.status, body: body };
+    });
+  }
+  function netError(e) { return { ok: false, status: 0, body: { error: "network error: " + (e && e.message || e) } }; }
+
   function fetchJSON(url, opts) {
     return fetch(url, Object.assign({ headers: { "Accept": "application/json" } }, opts || {}))
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; }); });
+      .then(toResult, netError);
   }
 
   function postJSON(url, body) {
     return fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify(body)
-    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); });
+    }).then(toResult, netError);
   }
 
   function currentWindow() {
@@ -164,9 +180,9 @@
       if (info) {
         var d = r.body;
         info.textContent = (d.sessionDead ? "⚠ session invalid · " : "") +
-          d.devices.length + " device(s) · refreshed " + fmtAgo((Date.now() / 1000) - d.updatedAt);
+          (d.devices || []).length + " device(s) · refreshed " + fmtAgo((Date.now() / 1000) - d.updatedAt);
       }
-      r.body.devices.forEach(function (dev) {
+      (r.body.devices || []).forEach(function (dev) {
         var root = document.querySelector('[data-device-id="' + dev.id + '"]');
         if (!root) return;
         if (dev.onlineLabel != null) {
@@ -242,7 +258,7 @@
         action: "power_save", enable: enable,
         startMinutes: parseInt(start, 10) || 0,
         durationMinutes: parseInt(dur, 10) || 0
-      }).then(showOutcome);
+      }).then(function (r) { showOutcome(r); btn.disabled = false; });
       return;
     }
 
@@ -252,20 +268,18 @@
     ev.preventDefault();
     btn.disabled = true;
     postJSON("/api/device/" + id + "/action", { action: action })
-      .then(function (r) { showOutcome(r); btn.disabled = false; })
-      .catch(function () { btn.disabled = false; });
+      .then(function (r) { showOutcome(r); btn.disabled = false; });
   });
 
   function showOutcome(r) {
     var box = document.getElementById("action-outcome");
     if (!box) return;
     box.hidden = false;
-    box.className = "outcome " + (r.ok && r.body.ok ? "ok" : "err");
-    box.textContent = (r.ok && r.body.ok ? "✓ " : "✗ ") + (r.body.message || "done");
-    if (r.body.state) {
-      /* RF inhibit / power-save labels live in dashboard cards; refresh */
-      setTimeout(loadSummary, 1500);
-    }
+    var ok = r.ok && r.body.ok;
+    box.className = "outcome " + (ok ? "ok" : "err");
+    box.textContent = ok ? "✓ " + (r.body.message || "done")
+      : "✗ " + (r.body.error || r.body.message || "request failed (HTTP " + r.status + ")");
+    if (ok) setTimeout(loadSummary, 1500);
   }
 
   /* ---------- init per page ---------- */

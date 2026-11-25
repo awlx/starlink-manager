@@ -530,3 +530,14 @@ func TestSortedDevicesStable(t *testing.T) {
 		}
 	}
 }
+
+func TestSummaryEmptyDeviceListIsArray(t *testing.T) {
+	_, ts := newTestServer(t)
+	resp, err := http.Get(ts.URL + "/api/summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body := readAll(t, resp); !strings.Contains(body, `"devices":[]`) {
+		t.Errorf("summary without devices = %s, want devices:[]", body)
+	}
+}

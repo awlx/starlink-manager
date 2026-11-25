@@ -603,7 +603,7 @@ type summaryDevice struct {
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
-	var devs []summaryDevice
+	devs := []summaryDevice{}
 	for _, d := range sortedDevices(s.store) {
 		v := s.deviceView(d, now)
 		devs = append(devs, summaryDevice{
