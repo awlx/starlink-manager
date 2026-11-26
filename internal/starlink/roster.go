@@ -20,6 +20,9 @@ type ServiceLine struct {
 	Nickname  string
 	Terminals []*TerminalInfo
 	Routers   []*RouterInfo
+
+	Subscription    *Subscription
+	CanPauseService bool
 }
 
 // TerminalInfo describes a dish (user terminal) as reported by the roster.
@@ -155,8 +158,14 @@ func (r *Roster) fetch(ctx context.Context) ([]*ServiceLine, error) {
 
 func parseServiceLine(m map[string]any) *ServiceLine {
 	sl := &ServiceLine{
-		Number:   mapString(m, "serviceLineNumber", "serviceLine"),
-		Nickname: mapString(m, "nickname", "name"),
+		Number:          mapString(m, "serviceLineNumber", "serviceLine"),
+		Nickname:        mapString(m, "nickname", "name"),
+		CanPauseService: mapBool(m, "canPauseService"),
+	}
+	if sub, ok := lookup(m, "subscription"); ok {
+		if sm, ok := sub.(map[string]any); ok {
+			sl.Subscription = parseSubscription(sm)
+		}
 	}
 	if uts, ok := mapSlice(m, "userTerminals", "user_terminals"); ok {
 		for _, ut := range uts {

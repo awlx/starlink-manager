@@ -58,6 +58,12 @@ type fakeAPI struct {
 	handleFn      func(req *device.Request) (*device.Response, int32, string)
 	tokenRenewed  int
 	gatewayStatus int // HTTP status override for gateway calls
+	// billing endpoint behavior: change-options hit counter, body, status.
+	changeOptionsCount int
+	changeOptionsBody  string
+	changeOptionsStatus int
+	// mutation capture: method+path of subscription update/resume calls.
+	mutations []string
 }
 
 func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
@@ -116,6 +122,22 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
 		fmt.Fprintf(w, `{"content":{"totalCount":1,"pageIndex":0,"limit":100,"isLastPage":true,"results":[{
 			"serviceLineNumber": "SL-TEST-1",
 			"nickname": "FFMUC Dach",
+			"canPauseService": true,
+			"subscription": {
+				"subscriptionReferenceId": "11111111-2222-3333-4444-555555555555",
+				"productId": "de-test-subscription",
+				"productDescription": "Test Residential",
+				"startDate": "2024-06-29T02:11:45.006694+00:00",
+				"endDate": null,
+				"subscriptionClass": "Standard",
+				"active": true,
+				"canChangeService": true,
+				"canResumeService": false,
+				"pendingActivation": false,
+				"isPaused": false,
+				"isSuspended": false,
+				"isStandby": false
+			},
 			"userTerminals": [{
 				"userTerminalId": "ut12345678-a12b3456-123456c1",
 				"serialNumber": "KIT001",
@@ -130,6 +152,31 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
 				"isBypassed": false
 			}]
 		}]},"errors":[],"warnings":[],"information":[],"isValid":true}`)
+	})
+
+	mux.HandleFunc("/webagg/v1/public/subscriptions/change-options/", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.changeOptionsCount++
+		body, status := f.changeOptionsBody, f.changeOptionsStatus
+		f.mu.Unlock()
+		if status == 0 {
+			status = 200
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+	})
+
+	mux.HandleFunc("/webagg/v1/public/subscriptions/line/", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		path := r.URL.Path
+		if r.URL.RawQuery != "" {
+			path += "?" + r.URL.RawQuery
+		}
+		f.mutations = append(f.mutations, r.Method+" "+path)
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"isValid":true}`)
 	})
 
 	mux.HandleFunc("/device-data/cache/v1/telemetry", func(w http.ResponseWriter, r *http.Request) {
