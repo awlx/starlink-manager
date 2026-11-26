@@ -236,7 +236,7 @@ stack — never route it through Traefik to the public web. Exposed series:
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `starlink_device_up` | gauge | 1 per device that answered a poll within the online TTL |
+| `starlink_device_up` | gauge | 1 when the device's latest poll succeeded, 0 when it failed |
 | `starlink_device_pop_ping_drop_rate` | gauge | Ping drop fraction (0..1) |
 | `starlink_device_pop_ping_latency_ms` | gauge | Latest ping latency |
 | `starlink_device_downlink_bps` / `starlink_device_uplink_bps` | gauge | Latest throughput |
@@ -248,8 +248,11 @@ stack — never route it through Traefik to the public web. Exposed series:
 | `starlink_poll_round_duration_seconds` | histogram | Duration of one complete poll round |
 
 Per-device series carry `device="<id>"` and `name="<friendly name>"`
-labels. The exposition is hand-rolled in text format (no client library)
-to keep dependencies small.
+labels; a renamed device's old series is replaced and a device that left
+the roster has its series removed. Fleet counts, `starlink_session_dead`
+and the store size are computed at scrape time. The exposition is
+hand-rolled in text format (no client library) to keep dependencies
+small.
 
 ## Security notes
 

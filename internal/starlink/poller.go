@@ -51,6 +51,7 @@ type Poller struct {
 type MetricsSink interface {
 	SetGauge(name, labels string, value float64)
 	SetDeviceGauge(name string, id, label string, value float64)
+	DeleteDevice(id string)
 	IncCounter(name, labels string)
 	ObserveHistogram(name string, v float64)
 }
@@ -209,10 +210,11 @@ func (p *Poller) Tick() error {
 	start := time.Now()
 	defer func() { p.observeRound(time.Since(start)) }()
 
-	if p.session.SessionDead() {
-		if p.metrics != nil {
-			p.metrics.SetGauge("starlink_session_dead", "", 1)
-		}
+	dead := p.session.SessionDead()
+	if p.metrics != nil {
+		p.metrics.SetGauge("starlink_session_dead", "", boolFloat(dead))
+	}
+	if dead {
 		if !p.session.RecoveryDue() {
 			p.log.Warn("starlink session dead; skipping poll (recovery probe scheduled; update STARLINK_SSO_COOKIE if the cookie expired)")
 			return nil
@@ -313,6 +315,10 @@ func (p *Poller) Tick() error {
 	for _, d := range devs {
 		if d.Retired == nil {
 			pollable = append(pollable, d)
+		} else if p.metrics != nil {
+			// Retired devices are no longer polled; drop their series so
+			// stale values (e.g. device_up=1) do not linger until restart.
+			p.metrics.DeleteDevice(d.ID)
 		}
 	}
 	p.pollDevices(pollable)
@@ -564,4 +570,11 @@ func (sl *ServiceLine) NicknameOrNumber() string {
 		return sl.Nickname
 	}
 	return sl.Number
+}
+
+func boolFloat(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }

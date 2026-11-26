@@ -92,6 +92,7 @@ func run() error {
 		reg := metrics.New(log)
 		poller.SetMetrics(reg)
 		srv.SetMetrics(reg)
+		reg.OnCollect(srv.CollectMetrics)
 		metricsSrv, err = metrics.Serve(reg, cfg.MetricsListenAddr, log)
 		if err != nil {
 			return fmt.Errorf("metrics server: %w", err)

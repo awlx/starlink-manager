@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -143,5 +144,58 @@ func TestPollDevicesUnreachableRoundCompletes(t *testing.T) {
 		if got, _ := store.Device(d.ID); got.Status != nil {
 			t.Fatalf("unreachable device %s got a status", d.ID)
 		}
+	}
+}
+
+type recordingSink struct {
+	mu      sync.Mutex
+	gauges  map[string]float64
+	deleted []string
+}
+
+func (r *recordingSink) SetGauge(name, labels string, v float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.gauges == nil {
+		r.gauges = map[string]float64{}
+	}
+	r.gauges[name+"{"+labels+"}"] = v
+}
+func (r *recordingSink) SetDeviceGauge(name, id, label string, v float64) {
+	r.SetGauge(name, id, v)
+}
+func (r *recordingSink) DeleteDevice(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deleted = append(r.deleted, id)
+}
+func (r *recordingSink) IncCounter(string, string)        {}
+func (r *recordingSink) ObserveHistogram(string, float64) {}
+
+// A healthy tick reports session_dead=0 (not only the 1 transition), and
+// devices that left the roster have their series removed.
+func TestPollerTickMetrics(t *testing.T) {
+	_, ts := newFakeAPI(t)
+	clock := &fakeClock{now: time.Now()}
+	s := newTestSession(t, ts, clock)
+	store := NewStore(t.TempDir(), 24*time.Hour, clock.Now)
+	store.UpsertDevice(&Device{ID: "ut-gone", Kind: KindDish, Name: "Old dish"})
+	p := NewPoller(NewGateway(s, ts.URL, ts.Client(), nil), NewRoster(s, ts.URL, time.Minute, nil),
+		NewTelemetry(s, ts.URL, nil), s, store, 30*time.Second, testLogger(t))
+	sink := &recordingSink{}
+	p.SetMetrics(sink)
+	if err := p.Tick(); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if v, ok := sink.gauges["starlink_session_dead{}"]; !ok || v != 0 {
+		t.Errorf("session_dead = %v (set=%v), want 0", v, ok)
+	}
+	if !slices.Contains(sink.deleted, "ut-gone") {
+		t.Errorf("retired device series not deleted: %v", sink.deleted)
+	}
+	if _, ok := sink.gauges["starlink_device_up{ut-gone}"]; ok {
+		t.Error("retired device must not be polled")
 	}
 }

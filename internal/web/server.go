@@ -62,8 +62,10 @@ func (s *Server) SetBilling(b *starlink.Billing) {
 	s.billing = b
 }
 
-// updateMetrics refreshes the fleet-level gauges after a summary render.
-func (s *Server) updateMetrics() {
+// CollectMetrics refreshes the fleet-level gauges; it is registered as a
+// scrape-time collector so the values are current even when nobody opens
+// the dashboard.
+func (s *Server) CollectMetrics() {
 	if s.metrics == nil {
 		return
 	}
@@ -293,7 +295,6 @@ func (s *Server) logf(format string, args ...any) {
 }
 
 func (s *Server) baseInfo(r *http.Request) pageInfo {
-	s.updateMetrics()
 	u, _ := auth.UserFromContext(r.Context())
 	return pageInfo{
 		Title:           "Starlink Manager",
@@ -1040,7 +1041,6 @@ type summaryDevice struct {
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
-	s.updateMetrics()
 	now := time.Now()
 	devs := []summaryDevice{}
 	for _, d := range sortedDevices(s.store) {
