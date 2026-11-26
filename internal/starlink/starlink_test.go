@@ -540,6 +540,30 @@ func TestSessionDeadRecovery(t *testing.T) {
 	if tok == "" || s.SessionDead() {
 		t.Fatal("session should be recovered")
 	}
+
+	// After a successful recovery the one-strike window must be over: a
+	// later single failure counts like any other and does not latch.
+	s.mu.Lock()
+	s.latchDeadLocked()
+	s.mu.Unlock()
+	if s.SessionDead() {
+		t.Fatal("a single failure after a successful recovery must not latch the session dead")
+	}
+}
+
+// A recovery that reuses a still-fresh token is confirmed by the data call
+// (MarkAlive), which must end the one-strike window too.
+func TestMarkAliveEndsRecoveryWindow(t *testing.T) {
+	_, ts := newFakeAPI(t)
+	s := newTestSession(t, ts, &fakeClock{now: time.Now()})
+	s.recoveryProbe.Store(true)
+	s.MarkAlive()
+	s.mu.Lock()
+	s.latchDeadLocked()
+	s.mu.Unlock()
+	if s.SessionDead() {
+		t.Fatal("one failure after a confirmed recovery must not latch")
+	}
 }
 
 func TestMarkAliveClearsDeadLatch(t *testing.T) {
