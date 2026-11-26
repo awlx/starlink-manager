@@ -91,6 +91,13 @@ func NewRoster(session *Session, apiBase string, ttl time.Duration, log *slog.Lo
 	}
 }
 
+// Invalidate forces the next Get to refetch (e.g. after a plan change).
+func (r *Roster) Invalidate() {
+	r.mu.Lock()
+	r.fetched = time.Time{}
+	r.mu.Unlock()
+}
+
 // Get returns the cached roster, refreshing it when stale. Pagination walks
 // pages of 100 service lines until isLastPage.
 func (r *Roster) Get(ctx context.Context) ([]*ServiceLine, error) {

@@ -59,8 +59,8 @@ type fakeAPI struct {
 	tokenRenewed  int
 	gatewayStatus int // HTTP status override for gateway calls
 	// billing endpoint behavior: change-options hit counter, body, status.
-	changeOptionsCount int
-	changeOptionsBody  string
+	changeOptionsCount  int
+	changeOptionsBody   string
 	changeOptionsStatus int
 	// mutation capture: method+path of subscription update/resume calls.
 	mutations []string
@@ -169,7 +169,7 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
 
 	mux.HandleFunc("/webagg/v1/public/subscriptions/line/", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
-		path := r.URL.Path
+		path := r.URL.EscapedPath()
 		if r.URL.RawQuery != "" {
 			path += "?" + r.URL.RawQuery
 		}

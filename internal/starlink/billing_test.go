@@ -25,8 +25,14 @@ const changeOptionsFixture = `{"content":{
     {"productResponse":{
       "productId":"de-test-standby","name":"Standby Mode","description":"Standby Mode","price":5.0,"customerFacingPrice":5,"isoCurrencyCode":"EUR","isStandby":true},
      "variants":[
-      {"effectiveTimestamp":null,"oneTimeAmount":0,"recurringAmount":5}
+      {"effectiveTimestamp":"2026-12-13T00:00:00+00:00","oneTimeAmount":0,"recurringAmount":5}
     ]},
+    {"productResponse":{
+      "productId":"de-test-subscription","description":"Test Residential","customerFacingPrice":50,"isoCurrencyCode":"EUR","isStandby":false},
+     "variants":[
+      {"effectiveTimestamp":null,"oneTimeAmount":0,"recurringAmount":50}
+    ]},
+    {"productResponse":{"description":"no id"},"variants":[]},
     {"productResponse":{
       "productId":"de-test-plan-200","name":"Test 200 Mbps","description":"Test 200 Mbps","price":55.0,"customerFacingPrice":55,"isoCurrencyCode":"EUR","isStandby":false},
      "variants":null}
@@ -47,8 +53,9 @@ func TestParseChangeOptions(t *testing.T) {
 	if opts.Pending != nil {
 		t.Errorf("pending should be nil, got %+v", opts.Pending)
 	}
-	if len(opts.Options) != 3 {
-		t.Fatalf("want 3 options, got %d", len(opts.Options))
+	// The id-less option is dropped.
+	if len(opts.Options) != 4 {
+		t.Fatalf("want 4 options, got %d", len(opts.Options))
 	}
 
 	first := opts.Options[0]
@@ -62,21 +69,45 @@ func TestParseChangeOptions(t *testing.T) {
 		t.Errorf("option 1 prices wrong: %+v", first)
 	}
 
+	if sched, ok := first.Schedule(); !ok || sched {
+		t.Errorf("option with immediate variant must apply immediately: sched=%v ok=%v", sched, ok)
+	}
+
+	// Standby Mode (as on the live API) only offers a scheduled variant.
 	standby := opts.Options[1]
-	if !standby.Product.IsStandby || standby.ScheduledEffective.IsZero() == false {
+	if !standby.Product.IsStandby || standby.HasImmediate || !standby.HasScheduled || standby.ScheduledRecurring != 5 {
 		t.Errorf("standby option wrong: %+v", standby)
 	}
-	if standby.ImmediateOneTime != 0 || standby.ImmediateRecurring != 5 {
-		t.Errorf("standby prices wrong: %+v", standby)
+	if sched, ok := standby.Schedule(); !ok || !sched {
+		t.Errorf("scheduled-only option must be scheduled: sched=%v ok=%v", sched, ok)
+	}
+
+	// The current product is listed among the options; mark it.
+	if cur := opts.Options[2]; !cur.IsCurrent || first.IsCurrent || standby.IsCurrent {
+		t.Errorf("IsCurrent wrong: %+v", opts.Options)
 	}
 
 	// Option without variants must still parse with a usable product.
-	noVariants := opts.Options[2]
+	noVariants := opts.Options[3]
 	if noVariants.Product.ProductID != "de-test-plan-200" || noVariants.Product.Price != 55 {
 		t.Errorf("variant-less option wrong: %+v", noVariants)
 	}
 	if !noVariants.ScheduledEffective.IsZero() {
 		t.Errorf("variant-less option should have no scheduled variant: %+v", noVariants)
+	}
+	if _, ok := noVariants.Schedule(); ok {
+		t.Error("variant-less option must not be applicable")
+	}
+}
+
+func TestParseChangeOptionsPendingShapes(t *testing.T) {
+	opts, err := parseChangeOptions([]byte(`{"content":{"currentProduct":{"productId":"a"},"pendingProduct":"de-next"}}`))
+	if err != nil || opts.Pending == nil || opts.Pending.ProductID != "de-next" {
+		t.Errorf("string pendingProduct: %+v %v", opts, err)
+	}
+	opts, err = parseChangeOptions([]byte(`{"content":{"currentProduct":{"productId":"a"},"pendingProduct":{"productId":"de-next","description":"Next"}}}`))
+	if err != nil || opts.Pending == nil || opts.Pending.Description != "Next" {
+		t.Errorf("object pendingProduct: %+v %v", opts, err)
 	}
 }
 
@@ -202,7 +233,7 @@ func TestBillingGetChangeOptionsCached(t *testing.T) {
 	if opts.ServiceLine != "SL-TEST-1" {
 		t.Errorf("service line not stamped: %q", opts.ServiceLine)
 	}
-	if len(opts.Options) != 3 {
+	if len(opts.Options) != 4 {
 		t.Errorf("options: %d", len(opts.Options))
 	}
 	opts2, err := b.GetChangeOptions(ctx, "SL-TEST-1")
@@ -280,5 +311,54 @@ func TestBillingMutationPaths(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("mutation paths\n got: %v\nwant: %v", got, want)
+	}
+}
+
+// Identifiers are path-escaped so they cannot rewrite the upstream path,
+// and empty identifiers never reach the API.
+func TestBillingEscapesIdentifiers(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	s := newTestSession(t, ts, &fakeClock{now: time.Now()})
+	b := NewBilling(s, ts.URL, testLogger(t))
+	ctx := context.Background()
+	_ = b.UpdatePlan(ctx, "../x", "a/b?c", false)
+	if err := b.UpdatePlan(ctx, "", "plan", false); err == nil {
+		t.Error("empty subscription reference must error")
+	}
+	if err := b.UpdatePlan(ctx, "sub", "", false); err == nil {
+		t.Error("empty product must error")
+	}
+	if err := b.Resume(ctx, ""); err == nil {
+		t.Error("empty resume reference must error")
+	}
+	f.mu.Lock()
+	got := append([]string(nil), f.mutations...)
+	f.mu.Unlock()
+	want := []string{"POST /webagg/v1/public/subscriptions/line/..%2Fx/product/a%2Fb%3Fc/update?schedule=false"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("escaped mutation paths\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestBillingFreshBypassesCache(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	f.changeOptionsBody = changeOptionsFixture
+	s := newTestSession(t, ts, &fakeClock{now: time.Now()})
+	b := NewBilling(s, ts.URL, testLogger(t))
+	ctx := context.Background()
+	for _, fn := range []func(context.Context, string) (*ChangeOptions, error){b.GetChangeOptions, b.FreshChangeOptions, b.GetChangeOptions} {
+		if _, err := fn(ctx, "SL-TEST-1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.Invalidate("SL-TEST-1")
+	if _, err := b.GetChangeOptions(ctx, "SL-TEST-1"); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	count := f.changeOptionsCount
+	f.mu.Unlock()
+	if count != 3 {
+		t.Errorf("hits = %d, want 3 (initial, fresh, after invalidate)", count)
 	}
 }

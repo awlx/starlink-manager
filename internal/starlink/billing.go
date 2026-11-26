@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,17 +39,22 @@ type Subscription struct {
 	PendingActivation  bool
 	CanChange          bool
 	CanResume          bool
+	// PendingProductID is a plan change scheduled for the next billing
+	// cycle (roster "delayedProductId"), or "" when none is pending.
+	PendingProductID string
+	// StandbyPending reports a scheduled switch into standby mode.
+	StandbyPending bool
 }
 
 // ProductSummary describes one plan product (the current plan or a change
 // option). Price is the customer-facing recurring monthly price.
 type ProductSummary struct {
-	ProductID        string  `json:"productId"`
-	Name             string  `json:"name"`
-	Description      string  `json:"description"`
-	Price            float64 `json:"price"`
-	Currency         string  `json:"currency"`
-	IsStandby        bool    `json:"isStandby"`
+	ProductID   string  `json:"productId"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Price       float64 `json:"price"`
+	Currency    string  `json:"currency"`
+	IsStandby   bool    `json:"isStandby"`
 }
 
 // ChangeOption is one available plan change with its price variants. A
@@ -57,11 +63,31 @@ type ProductSummary struct {
 // one-time charge); some options only offer one of the two.
 type ChangeOption struct {
 	Product ProductSummary `json:"product"`
+	// IsCurrent marks the line's current product, which the account API
+	// lists among the options; it is not a change and is never applied.
+	IsCurrent bool `json:"isCurrent"`
+	// HasImmediate/HasScheduled report which variants exist. Standby Mode,
+	// for example, only offers a scheduled (next billing cycle) variant.
+	HasImmediate bool `json:"hasImmediate"`
+	HasScheduled bool `json:"hasScheduled"`
 
-	ScheduledEffective time.Time `json:"scheduledEffective,omitempty"`
-	ScheduledRecurring float64   `json:"scheduledRecurring,omitempty"`
-	ImmediateOneTime   float64   `json:"immediateOneTime,omitempty"`
-	ImmediateRecurring float64   `json:"immediateRecurring,omitempty"`
+	ScheduledEffective time.Time `json:"scheduledEffective,omitzero"`
+	ScheduledRecurring float64   `json:"scheduledRecurring"`
+	ImmediateOneTime   float64   `json:"immediateOneTime"`
+	ImmediateRecurring float64   `json:"immediateRecurring"`
+}
+
+// Schedule reports how the option must be applied: false (immediate) when
+// an immediate variant exists, true (next billing cycle) when only a
+// scheduled variant is offered. ok is false when neither exists.
+func (o *ChangeOption) Schedule() (schedule, ok bool) {
+	switch {
+	case o.HasImmediate:
+		return false, true
+	case o.HasScheduled:
+		return true, true
+	}
+	return false, false
 }
 
 // ChangeOptions is the parsed change-options response for one service line.
@@ -113,7 +139,13 @@ func (b *Billing) GetChangeOptions(ctx context.Context, serviceLine string) (*Ch
 		return entry.options, nil
 	}
 	b.mu.Unlock()
+	return b.FreshChangeOptions(ctx, serviceLine)
+}
 
+// FreshChangeOptions bypasses the cache (and refreshes it). Mutations
+// validate against these live options, so an option withdrawn or repriced
+// within the cache TTL cannot be applied from a stale list.
+func (b *Billing) FreshChangeOptions(ctx context.Context, serviceLine string) (*ChangeOptions, error) {
 	opts, err := b.fetchChangeOptions(ctx, serviceLine)
 	if err != nil {
 		return nil, err
@@ -124,8 +156,16 @@ func (b *Billing) GetChangeOptions(ctx context.Context, serviceLine string) (*Ch
 	return opts, nil
 }
 
+// Invalidate drops the cached options of a service line (after a
+// mutation the current plan and the offered options change).
+func (b *Billing) Invalidate(serviceLine string) {
+	b.mu.Lock()
+	delete(b.cache, serviceLine)
+	b.mu.Unlock()
+}
+
 func (b *Billing) fetchChangeOptions(ctx context.Context, serviceLine string) (*ChangeOptions, error) {
-	u := fmt.Sprintf("%s/webagg/v1/public/subscriptions/change-options/%s", b.apiBase, serviceLine)
+	u := fmt.Sprintf("%s/webagg/v1/public/subscriptions/change-options/%s", b.apiBase, url.PathEscape(serviceLine))
 	_, data, err := b.session.request(ctx, "GET", u, nil, "")
 	if err != nil {
 		return nil, fmt.Errorf("fetching change options for %s: %w", serviceLine, err)
@@ -142,8 +182,11 @@ func (b *Billing) fetchChangeOptions(ctx context.Context, serviceLine string) (*
 // (verified endpoint form) the change applies immediately with a prorated
 // charge; with schedule=true it applies at the next billing cycle.
 func (b *Billing) UpdatePlan(ctx context.Context, subRefID, productID string, schedule bool) error {
+	if subRefID == "" || productID == "" {
+		return fmt.Errorf("plan change needs a subscription reference and a product")
+	}
 	u := fmt.Sprintf("%s/webagg/v1/public/subscriptions/line/%s/product/%s/update?schedule=%t",
-		b.apiBase, subRefID, productID, schedule)
+		b.apiBase, url.PathEscape(subRefID), url.PathEscape(productID), schedule)
 	_, _, err := b.session.request(ctx, "POST", u, []byte("{}"), "application/json")
 	if err != nil {
 		b.logEvent("billing plan change failed", "subscription", subRefID, "plan", productID, "scheduled", schedule, "err", err)
@@ -155,7 +198,10 @@ func (b *Billing) UpdatePlan(ctx context.Context, subRefID, productID string, sc
 
 // Resume resumes a paused subscription line.
 func (b *Billing) Resume(ctx context.Context, subRefID string) error {
-	u := fmt.Sprintf("%s/webagg/v1/public/subscriptions/line/%s/resume", b.apiBase, subRefID)
+	if subRefID == "" {
+		return fmt.Errorf("resume needs a subscription reference")
+	}
+	u := fmt.Sprintf("%s/webagg/v1/public/subscriptions/line/%s/resume", b.apiBase, url.PathEscape(subRefID))
 	_, _, err := b.session.request(ctx, "PUT", u, nil, "")
 	if err != nil {
 		b.logEvent("billing resume failed", "subscription", subRefID, "err", err)
@@ -181,7 +227,7 @@ func parseChangeOptions(data []byte) (*ChangeOptions, error) {
 	var env struct {
 		Content struct {
 			CurrentProduct map[string]any   `json:"currentProduct"`
-			PendingProduct map[string]any   `json:"pendingProduct"`
+			PendingProduct any              `json:"pendingProduct"`
 			ChangeOptions  []map[string]any `json:"changeOptions"`
 		} `json:"content"`
 	}
@@ -194,12 +240,24 @@ func parseChangeOptions(data []byte) (*ChangeOptions, error) {
 	out := &ChangeOptions{
 		Current: parseProductSummary(env.Content.CurrentProduct),
 	}
-	if env.Content.PendingProduct != nil {
-		p := parseProductSummary(env.Content.PendingProduct)
+	// pendingProduct is null, a product block, or (per the app) a bare
+	// product id; tolerate all three instead of failing the whole response.
+	switch pp := env.Content.PendingProduct.(type) {
+	case map[string]any:
+		p := parseProductSummary(pp)
 		out.Pending = &p
+	case string:
+		if pp != "" {
+			out.Pending = &ProductSummary{ProductID: pp, Description: pp}
+		}
 	}
 	for _, raw := range env.Content.ChangeOptions {
-		out.Options = append(out.Options, parseChangeOption(raw))
+		opt := parseChangeOption(raw)
+		if opt.Product.ProductID == "" {
+			continue // unusable: cannot be addressed or validated
+		}
+		opt.IsCurrent = out.Current.ProductID != "" && opt.Product.ProductID == out.Current.ProductID
+		out.Options = append(out.Options, opt)
 	}
 	return out, nil
 }
@@ -248,15 +306,15 @@ func parseChangeOption(m map[string]any) ChangeOption {
 		recurring := mapFloatOr(vm, "recurringAmount")
 		oneTime := mapFloatOr(vm, "oneTimeAmount")
 		if !effective.IsZero() {
-			if out.ScheduledEffective.IsZero() {
+			if !out.HasScheduled {
+				out.HasScheduled = true
 				out.ScheduledEffective = effective
 				out.ScheduledRecurring = recurring
 			}
-		} else {
-			if out.ImmediateOneTime == 0 && out.ImmediateRecurring == 0 {
-				out.ImmediateOneTime = oneTime
-				out.ImmediateRecurring = recurring
-			}
+		} else if !out.HasImmediate {
+			out.HasImmediate = true
+			out.ImmediateOneTime = oneTime
+			out.ImmediateRecurring = recurring
 		}
 	}
 	return out
@@ -281,6 +339,8 @@ func parseSubscription(m map[string]any) *Subscription {
 		CanResume:          mapBool(m, "canResumeService"),
 		StartDate:          mapTime(m, "startDate"),
 		EndDate:            mapTime(m, "endDate"),
+		PendingProductID:   mapString(m, "delayedProductId"),
+		StandbyPending:     mapBool(m, "isStandbyPending"),
 	}
 	if sub.ProductDescription == "" {
 		sub.ProductDescription = sub.ProductID
