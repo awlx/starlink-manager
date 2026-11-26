@@ -21,6 +21,7 @@
     <dl class="kv">
       <dt>Plan</dt><dd>{{if .Plan}}{{.Plan}}{{else}}unknown{{end}}{{if .PlanClass}} <span class="muted">({{.PlanClass}})</span>{{end}}</dd>
       {{if .SinceText}}<dt>Since</dt><dd>{{.SinceText}}{{if .UntilText}} · until {{.UntilText}}{{end}}</dd>{{end}}
+      {{if .PendingText}}<dt>Pending</dt><dd>{{.PendingText}}</dd>{{end}}
       <dt>Devices</dt><dd>{{.Terminals}}</dd>
     </dl>
     {{if $.AdminUser}}

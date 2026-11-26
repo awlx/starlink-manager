@@ -218,6 +218,7 @@ summary { cursor: pointer; color: var(--link); min-height: 40px; padding: 8px 0;
 .billing-dialog h2 { margin-top: 0; }
 .billing-dialog fieldset { border: 1px solid var(--border); border-radius: 8px; margin: 12px 0; padding: 10px 12px; max-height: 280px; overflow-y: auto; }
 .plan-option { display: flex; gap: 8px; padding: 6px 0; align-items: flex-start; cursor: pointer; }
+.plan-option-disabled { opacity: 0.6; cursor: not-allowed; }
 .plan-confirm-check { display: flex; gap: 8px; align-items: flex-start; margin: 12px 0; cursor: pointer; }
 .billing-dialog label { display: block; margin-top: 8px; }
 .billing-dialog input[type=text] { width: 100%; margin-top: 4px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-inset); color: var(--fg); }

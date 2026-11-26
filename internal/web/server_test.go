@@ -887,9 +887,13 @@ const billingLineJSON = `{
 const billingOptionsJSON = `{"content":{
 	"currentProduct":{"productId":"de-test-subscription","description":"Test Residential","price":49.0,"customerFacingPrice":50,"isoCurrencyCode":"EUR","isStandby":false},
 	"pendingProduct":null,
-	"changeOptions":[{"productResponse":{
-		"productId":"de-test-plan-100","name":"Test 100 Mbps","description":"Test 100 Mbps","price":35.0,"customerFacingPrice":35,"isoCurrencyCode":"EUR","isStandby":false},
-		"variants":[{"effectiveTimestamp":"2026-12-13T00:00:00+00:00","oneTimeAmount":0,"recurringAmount":35}]}
+	"changeOptions":[
+		{"productResponse":{"productId":"de-test-subscription","description":"Test Residential","customerFacingPrice":50,"isoCurrencyCode":"EUR","isStandby":false},
+		 "variants":[{"effectiveTimestamp":null,"oneTimeAmount":0,"recurringAmount":50}]},
+		{"productResponse":{"productId":"de-test-plan-100","name":"Test 100 Mbps","description":"Test 100 Mbps","price":35.0,"customerFacingPrice":35,"isoCurrencyCode":"EUR","isStandby":false},
+		 "variants":[{"effectiveTimestamp":"2026-12-13T00:00:00+00:00","oneTimeAmount":0,"recurringAmount":35},{"effectiveTimestamp":null,"oneTimeAmount":8.66,"recurringAmount":35}]},
+		{"productResponse":{"productId":"de-test-standby","description":"Standby Mode","customerFacingPrice":5,"isoCurrencyCode":"EUR","isStandby":true},
+		 "variants":[{"effectiveTimestamp":"2026-12-13T00:00:00+00:00","oneTimeAmount":0,"recurringAmount":5}]}
 	]},"isValid":true}`
 
 // newBillingTestServer starts a fake account API (probe + roster + billing
@@ -897,6 +901,11 @@ const billingOptionsJSON = `{"content":{
 // Server wired to both, and returns the web httptest server plus the API
 // server for mutation inspection.
 func newBillingTestServer(t *testing.T) (*Server, *httptest.Server, *int, *[]string) {
+	t.Helper()
+	return newBillingTestServerLine(t, billingLineJSON)
+}
+
+func newBillingTestServerLine(t *testing.T, lineJSON string) (*Server, *httptest.Server, *int, *[]string) {
 	t.Helper()
 	var mu sync.Mutex
 	changeOptionsHits := 0
@@ -909,7 +918,7 @@ func newBillingTestServer(t *testing.T) (*Server, *httptest.Server, *int, *[]str
 	})
 	apiMux.HandleFunc("/webagg/v2/accounts/service-lines", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"content":{"totalCount":1,"isLastPage":true,"results":[%s]},"isValid":true}`, billingLineJSON)
+		fmt.Fprintf(w, `{"content":{"totalCount":1,"isLastPage":true,"results":[%s]},"isValid":true}`, lineJSON)
 	})
 	apiMux.HandleFunc("/webagg/v1/public/subscriptions/change-options/", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -1002,7 +1011,7 @@ func TestBillingOptionsEndpoint(t *testing.T) {
 		if body.Current.Description != "Test Residential" || body.Current.Price != 50 {
 			t.Errorf("current plan wrong: %+v", body.Current)
 		}
-		if len(body.Options) != 1 || body.Options[0].Product.ProductID != "de-test-plan-100" {
+		if len(body.Options) != 3 || body.Options[1].Product.ProductID != "de-test-plan-100" {
 			t.Errorf("options wrong: %+v", body.Options)
 		}
 	}
@@ -1024,46 +1033,170 @@ func postBillingJSON(t *testing.T, url string, payload string) (int, map[string]
 }
 
 func TestBillingChangeRequiresConfirmAndValidPlan(t *testing.T) {
-	_, ts, _, mutations := newBillingTestServer(t)
+	_, ts, hits, mutations := newBillingTestServer(t)
+	url := ts.URL + "/api/billing/line/SL-TEST-1/change"
 
-	// Wrong confirmation text is rejected before any mutation.
-	code, _ := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/change",
-		`{"productId":"de-test-plan-100","confirm":"wrong"}`)
-	if code != http.StatusBadRequest {
-		t.Errorf("wrong confirm status = %d, want 400", code)
-	}
-	// Unknown plan id is rejected.
-	code, _ = postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/change",
-		`{"productId":"de-does-not-exist","confirm":"whatever"}`)
-	if code != http.StatusBadRequest {
-		t.Errorf("unknown plan status = %d, want 400", code)
+	for _, tc := range []struct {
+		name, payload string
+		want          int
+	}{
+		{"wrong confirm", `{"productId":"de-test-plan-100","confirm":"wrong"}`, http.StatusBadRequest},
+		{"case differs", `{"productId":"de-test-plan-100","confirm":"test 100 mbps"}`, http.StatusBadRequest},
+		{"inner whitespace differs", `{"productId":"de-test-plan-100","confirm":"Test  100 Mbps"}`, http.StatusBadRequest},
+		{"unknown plan", `{"productId":"de-does-not-exist","confirm":"whatever"}`, http.StatusBadRequest},
+		{"current plan", `{"productId":"de-test-subscription","confirm":"Test Residential"}`, http.StatusBadRequest},
+		{"empty plan", `{"productId":"","confirm":""}`, http.StatusBadRequest},
+	} {
+		if code, body := postBillingJSON(t, url, tc.payload); code != tc.want {
+			t.Errorf("%s: status = %d (%v), want %d", tc.name, code, body, tc.want)
+		}
 	}
 	if len(*mutations) != 0 {
-		t.Errorf("no mutation should have been attempted, got %v", *mutations)
+		t.Fatalf("no mutation should have been attempted, got %v", *mutations)
 	}
-	// Correct confirmation (exact plan description) goes through.
-	code, body := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/change",
-		`{"productId":"de-test-plan-100","confirm":"Test 100 Mbps"}`)
-	if code != http.StatusOK || body["ok"] != true {
+	// Every validation fetched live options, bypassing the cache.
+	if *hits < 4 {
+		t.Errorf("change-options fetched %d times, want a live fetch per validated request", *hits)
+	}
+
+	// Exact plan description (outer whitespace ignored) goes through; the
+	// option has an immediate variant, so schedule=false.
+	code, body := postBillingJSON(t, url, `{"productId":"de-test-plan-100","confirm":"  Test 100 Mbps "}`)
+	if code != http.StatusOK || body["ok"] != true || body["scheduled"] != false {
 		t.Errorf("valid change: status=%d body=%v", code, body)
 	}
-	if len(*mutations) != 1 || !strings.Contains((*mutations)[0], "POST /webagg/v1/public/subscriptions/line/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/product/de-test-plan-100/update?schedule=false") {
+	if len(*mutations) != 1 || (*mutations)[0] != "POST /webagg/v1/public/subscriptions/line/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/product/de-test-plan-100/update?schedule=false" {
 		t.Errorf("mutation not recorded correctly: %v", *mutations)
 	}
 }
 
-func TestBillingResumeRequiresExactConfirm(t *testing.T) {
+func TestBillingChangeScheduledOnlyOption(t *testing.T) {
 	_, ts, _, mutations := newBillingTestServer(t)
-	code, _ := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/resume", `{"confirm":"resume "}`)
-	if code != http.StatusBadRequest {
-		t.Errorf("wrong confirm (lowercase) status = %d, want 400", code)
+	code, body := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/change",
+		`{"productId":"de-test-standby","confirm":"Standby Mode"}`)
+	if code != http.StatusOK || body["scheduled"] != true {
+		t.Fatalf("standby change: status=%d body=%v", code, body)
 	}
-	code, body := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/resume", `{"confirm":"RESUME"}`)
+	if msg, _ := body["message"].(string); !strings.Contains(msg, "2026-12-13") {
+		t.Errorf("message should name the effective date: %q", msg)
+	}
+	if len(*mutations) != 1 || !strings.HasSuffix((*mutations)[0], "/product/de-test-standby/update?schedule=true") {
+		t.Errorf("standby must be scheduled: %v", *mutations)
+	}
+}
+
+func TestBillingChangeRejectsWhenAccountDisallows(t *testing.T) {
+	line := strings.Replace(billingLineJSON, `"canChangeService":true`, `"canChangeService":false`, 1)
+	_, ts, _, mutations := newBillingTestServerLine(t, line)
+	code, _ := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/change",
+		`{"productId":"de-test-plan-100","confirm":"Test 100 Mbps"}`)
+	if code != http.StatusConflict || len(*mutations) != 0 {
+		t.Errorf("status=%d mutations=%v, want 409 and none", code, *mutations)
+	}
+}
+
+func TestBillingMutationsRejectNonJSONAndUnknownLines(t *testing.T) {
+	_, ts, _, mutations := newBillingTestServer(t)
+	resp, err := http.Post(ts.URL+"/api/billing/line/SL-TEST-1/resume", "text/plain", strings.NewReader(`{"confirm":"RESUME"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Errorf("text/plain status = %d, want 415", resp.StatusCode)
+	}
+	code, _ := postBillingJSON(t, ts.URL+"/api/billing/line/SL-OTHER/change", `{"productId":"de-test-plan-100","confirm":"Test 100 Mbps"}`)
+	if code != http.StatusNotFound {
+		t.Errorf("unknown line status = %d, want 404", code)
+	}
+	resp, err = http.Get(ts.URL + "/api/billing/line/..%2F..%2Fx/options")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("escaped line options status = %d, want 404", resp.StatusCode)
+	}
+	if len(*mutations) != 0 {
+		t.Errorf("unexpected mutations: %v", *mutations)
+	}
+}
+
+func TestBillingEndpointsRequireAdmin(t *testing.T) {
+	srv, _, _, mutations := newBillingTestServer(t)
+	srv.auth = middlewareFunc(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), &auth.User{Email: "viewer@example.test"})))
+		})
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/api/billing/line/SL-TEST-1/options")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("options as viewer = %d, want 403", resp.StatusCode)
+	}
+	for _, p := range []struct{ path, body string }{
+		{"/change", `{"productId":"de-test-plan-100","confirm":"Test 100 Mbps"}`},
+		{"/resume", `{"confirm":"RESUME"}`},
+	} {
+		if code, _ := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1"+p.path, p.body); code != http.StatusForbidden {
+			t.Errorf("%s as viewer = %d, want 403", p.path, code)
+		}
+	}
+	if len(*mutations) != 0 {
+		t.Errorf("viewer caused mutations: %v", *mutations)
+	}
+}
+
+func TestBillingResumeRequiresExactConfirm(t *testing.T) {
+	// Default fixture: the account offers no resume.
+	_, ts, _, mutations := newBillingTestServer(t)
+	if code, _ := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/resume", `{"confirm":"RESUME"}`); code != http.StatusConflict {
+		t.Errorf("resume without canResumeService = %d, want 409", code)
+	}
+	if len(*mutations) != 0 {
+		t.Fatalf("unexpected mutations: %v", *mutations)
+	}
+
+	paused := strings.NewReplacer(`"canResumeService":false`, `"canResumeService":true`, `"isPaused":false`, `"isPaused":true`).Replace(billingLineJSON)
+	_, ts, _, mutations = newBillingTestServerLine(t, paused)
+	for _, c := range []string{"resume", "Resume", "RE SUME", ""} {
+		if code, _ := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/resume", fmt.Sprintf(`{"confirm":%q}`, c)); code != http.StatusBadRequest {
+			t.Errorf("confirm %q status = %d, want 400", c, code)
+		}
+	}
+	code, body := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/resume", `{"confirm":" RESUME "}`)
 	if code != http.StatusOK || body["ok"] != true {
 		t.Errorf("valid resume: status=%d body=%v", code, body)
 	}
 	if len(*mutations) != 1 || (*mutations)[0] != "PUT /webagg/v1/public/subscriptions/line/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resume" {
 		t.Errorf("resume mutation not recorded: %v", *mutations)
+	}
+}
+
+func TestBillingLineLockRejectsConcurrent(t *testing.T) {
+	srv, _, _, _ := newBillingTestServer(t)
+	unlock, ok := srv.lockBillingLine("SL-TEST-1")
+	if !ok {
+		t.Fatal("first lock failed")
+	}
+	if _, ok := srv.lockBillingLine("SL-TEST-1"); ok {
+		t.Error("second lock on same line must fail")
+	}
+	if u2, ok := srv.lockBillingLine("SL-TEST-2"); !ok {
+		t.Error("other line must lock independently")
+	} else {
+		u2()
+	}
+	unlock()
+	if u3, ok := srv.lockBillingLine("SL-TEST-1"); !ok {
+		t.Error("lock not released")
+	} else {
+		u3()
 	}
 }
 

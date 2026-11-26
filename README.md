@@ -28,15 +28,24 @@ network can still be monitored and controlled through the Starlink cloud.
   the dish schedule clock is UTC, not local time.
 - **Router view**: connected WiFi clients.
 - **Billing view** (`/billing`): every service line with its current plan,
-  subscription state (active / standby / paused / suspended) and start
-  date. Admins can change a service line's plan (from the options the
-  account API actually offers) and resume a paused line. Both affect real
-  billing, so the UI shows the exact target plan and price and requires a
-  checkbox plus typing the plan name; the server re-validates the typed
-  confirmation against the live options before mutating, and every attempt
-  is logged (plan, service line, outcome). Pausing a pausable line is done
-  by switching its plan to “Standby Mode”. Extending a billing cycle is
-  **not** offered by the account API — only plan changes and resume exist.
+  subscription state (active / standby / paused / suspended), start date
+  and any pending scheduled change. Admins (only) can list a line's plan
+  options, change its plan (to an option the account API actually offers)
+  and resume a paused line. Both affect real billing, so the UI shows the
+  exact target plan, product id and price and requires a checkbox plus
+  typing the plan name. The server re-validates against freshly fetched
+  (uncached) options before mutating: the typed confirmation must equal
+  the plan's name exactly (case-sensitive; only surrounding whitespace is
+  ignored), the plan must not be the current one, and the account must
+  report the line as changeable (resume: resumable, typed `RESUME`).
+  Options offering an immediate variant apply now with a prorated one-time
+  charge; options that only offer a scheduled variant (e.g. “Standby
+  Mode”) are scheduled for the next billing cycle. Concurrent mutations on
+  the same line are refused, and every attempt and rejection is logged
+  (user, plan, service line, outcome — never credentials). Pausing a
+  pausable line is done by switching its plan to “Standby Mode”. Extending
+  a billing cycle is **not** offered by the account API — only plan
+  changes and resume exist.
 - `/healthz` is unauthenticated for container health checks.
 
 Everything is server-rendered Go templates plus one small dependency-free

@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/awlx/starlink-manager/api/device"
@@ -39,6 +40,9 @@ type Server struct {
 	billing *starlink.Billing
 	pages   map[string]*template.Template
 	metrics MetricsSink
+
+	billingMu   sync.Mutex
+	billingBusy map[string]bool
 }
 
 // MetricsSink collects operational metrics (satisfied by metrics.Registry).
@@ -152,7 +156,7 @@ func (s *Server) Handler() http.Handler {
 	protected.HandleFunc("GET /device/{id}", s.handleDevicePage)
 	protected.HandleFunc("GET /clients", s.handleClientsPage)
 	protected.HandleFunc("GET /billing", s.handleBillingPage)
-	protected.HandleFunc("GET /api/billing/line/{sl}/options", s.handleBillingOptions)
+	protected.Handle("GET /api/billing/line/{sl}/options", auth.RequireAdmin(http.HandlerFunc(s.handleBillingOptions)))
 	protected.Handle("GET /api/billing/{$}", http.NotFoundHandler())
 	protected.Handle("POST /api/billing/line/{sl}/change", auth.RequireAdmin(http.HandlerFunc(s.handleBillingChange)))
 	protected.Handle("POST /api/billing/line/{sl}/resume", auth.RequireAdmin(http.HandlerFunc(s.handleBillingResume)))
@@ -1343,6 +1347,7 @@ type billingLine struct {
 	UntilText   string
 	StatusLabel string
 	StatusClass string
+	PendingText string
 	CanPause    bool
 	CanResume   bool
 	CanChange   bool
@@ -1399,14 +1404,22 @@ func billingLineFor(line *starlink.ServiceLine) billingLine {
 			bl.UntilText = sub.EndDate.UTC().Format("2006-01-02")
 		}
 		switch {
-		case !sub.Active:
-			bl.StatusLabel, bl.StatusClass = "Inactive", "pill-error"
+		case sub.PendingProductID != "":
+			bl.PendingText = "Scheduled change to " + sub.PendingProductID + " at the next billing cycle"
+		case sub.StandbyPending:
+			bl.PendingText = "Switch to standby scheduled for the next billing cycle"
+		}
+		// Specific states win over the generic active flag: a paused or
+		// suspended line may also report active=false.
+		switch {
 		case sub.IsSuspended:
 			bl.StatusLabel, bl.StatusClass = "Suspended", "pill-error"
-		case sub.PendingActivation:
-			bl.StatusLabel, bl.StatusClass = "Pending activation", "pill-warn"
 		case sub.IsPaused:
 			bl.StatusLabel, bl.StatusClass = "Paused", "pill-warn"
+		case sub.PendingActivation:
+			bl.StatusLabel, bl.StatusClass = "Pending activation", "pill-warn"
+		case !sub.Active:
+			bl.StatusLabel, bl.StatusClass = "Inactive", "pill-error"
 		case sub.IsStandby:
 			bl.StatusLabel, bl.StatusClass = "Standby", "pill-warn"
 		default:
@@ -1429,14 +1442,20 @@ func (s *Server) billingClientOK(w http.ResponseWriter) bool {
 }
 
 // handleBillingOptions returns the available plan change options for a
-// service line (read-only, cached ~5 minutes).
+// service line (admin only, read-only, cached ~5 minutes). Only service
+// lines on the account roster are looked up.
 func (s *Server) handleBillingOptions(w http.ResponseWriter, r *http.Request) {
 	if !s.billingClientOK(w) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	opts, err := s.billing.GetChangeOptions(ctx, r.PathValue("sl"))
+	sl := r.PathValue("sl")
+	if _, err := s.serviceLineFor(ctx, sl); err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{err.Error()})
+		return
+	}
+	opts, err := s.billing.GetChangeOptions(ctx, sl)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, apiError{err.Error()})
 		return
@@ -1449,38 +1468,84 @@ type billingChangeRequest struct {
 	Confirm   string `json:"confirm"`
 }
 
-// handleBillingChange performs an immediate plan change after strict
-// server-side confirmation: the typed confirmation must match the target
-// plan's description exactly (case-insensitive) and the product must be
-// among the currently offered options.
+// decodeBillingRequest enforces same-origin, a JSON content type (so a
+// cross-site HTML form cannot submit it) and a bounded JSON body.
+func decodeBillingRequest(w http.ResponseWriter, r *http.Request) (billingChangeRequest, bool) {
+	var req billingChangeRequest
+	if !sameSiteOK(r) {
+		writeJSON(w, http.StatusForbidden, apiError{"cross-site request rejected"})
+		return req, false
+	}
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ct)), "application/json") {
+		writeJSON(w, http.StatusUnsupportedMediaType, apiError{"content type must be application/json"})
+		return req, false
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{"invalid body"})
+		return req, false
+	}
+	return req, true
+}
+
+// billingMutationTimeout bounds a billing mutation. The mutation context is
+// detached from the request so a client disconnect cannot cancel a POST
+// that the account API may already be applying (which would log a false
+// failure).
+const billingMutationTimeout = 60 * time.Second
+
+// handleBillingChange performs a plan change after strict server-side
+// validation: the line must allow changes, the product must be among the
+// live (uncached) options and not the current plan, and the typed
+// confirmation must equal the target plan's description exactly (only
+// surrounding whitespace is ignored). Options with an immediate variant
+// apply now (prorated); scheduled-only options (e.g. Standby Mode) apply at
+// the next billing cycle.
 func (s *Server) handleBillingChange(w http.ResponseWriter, r *http.Request) {
 	if !s.billingClientOK(w) {
 		return
 	}
-	if !sameSiteOK(r) {
-		writeJSON(w, http.StatusForbidden, apiError{"cross-site request rejected"})
+	req, ok := decodeBillingRequest(w, r)
+	if !ok {
 		return
 	}
 	sl := r.PathValue("sl")
-	var req billingChangeRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError{"invalid body"})
+	user := auditUser(r)
+	reject := func(status int, msg string) {
+		s.logAudit("billing plan change rejected", sl, req.ProductID, user, msg)
+		writeJSON(w, status, apiError{msg})
+	}
+	if strings.TrimSpace(req.ProductID) == "" {
+		reject(http.StatusBadRequest, "productId is required")
 		return
 	}
-	user, _ := auth.UserFromContext(r.Context())
-	userName := "<unknown>"
-	if user != nil {
-		userName = user.Name
+	unlock, ok := s.lockBillingLine(sl)
+	if !ok {
+		reject(http.StatusConflict, "another billing change for this service line is in progress")
+		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer unlock()
+
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), billingMutationTimeout)
 	defer cancel()
 
-	// Validate the target plan against the offered options and the typed
-	// confirmation before touching billing.
-	opts, err := s.billing.GetChangeOptions(ctx, sl)
+	line, err := s.serviceLineFor(ctx, sl)
 	if err != nil {
-		s.logAudit("billing plan change rejected", sl, req.ProductID, userName, err.Error())
-		writeJSON(w, http.StatusBadGateway, apiError{err.Error()})
+		reject(http.StatusNotFound, err.Error())
+		return
+	}
+	sub := line.Subscription
+	if sub == nil || sub.ReferenceID == "" {
+		reject(http.StatusConflict, "no subscription reference for "+sl)
+		return
+	}
+	if !sub.CanChange {
+		reject(http.StatusConflict, "the account does not allow plan changes for this service line")
+		return
+	}
+	// Validate against live options, never the cache.
+	opts, err := s.billing.FreshChangeOptions(ctx, sl)
+	if err != nil {
+		reject(http.StatusBadGateway, err.Error())
 		return
 	}
 	var target *starlink.ChangeOption
@@ -1491,109 +1556,165 @@ func (s *Server) handleBillingChange(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if target == nil {
-		s.logAudit("billing plan change rejected", sl, req.ProductID, userName, "plan not among offered options")
-		writeJSON(w, http.StatusBadRequest, apiError{"plan is not among the offered options"})
+		reject(http.StatusBadRequest, "plan is not among the offered options")
 		return
 	}
-	if strings.TrimSpace(req.Confirm) == "" ||
-		!strings.EqualFold(strings.TrimSpace(req.Confirm), target.Product.Description) {
-		s.logAudit("billing plan change rejected", sl, req.ProductID, userName, "confirmation text mismatch")
-		writeJSON(w, http.StatusBadRequest, apiError{fmt.Sprintf(
-			"confirmation must be the exact plan name %q", target.Product.Description)})
+	if target.IsCurrent || req.ProductID == opts.Current.ProductID || req.ProductID == sub.ProductID {
+		reject(http.StatusBadRequest, "plan is already the current plan of this service line")
+		return
+	}
+	want := target.Product.Description
+	if want == "" || strings.TrimSpace(req.Confirm) != want {
+		reject(http.StatusBadRequest, fmt.Sprintf("confirmation must be the exact plan name %q", want))
+		return
+	}
+	schedule, ok := target.Schedule()
+	if !ok {
+		reject(http.StatusBadRequest, "the account API offers no price variant for this plan")
 		return
 	}
 
-	subRef, err := s.subscriptionRefFor(ctx, sl)
+	s.logAudit("billing plan change attempted", sl, req.ProductID, user, fmt.Sprintf("scheduled=%t", schedule))
+	err = s.billing.UpdatePlan(ctx, sub.ReferenceID, req.ProductID, schedule)
+	// Whatever the outcome, the cached plan data may now be outdated.
+	s.billing.Invalidate(sl)
+	if s.roster != nil {
+		s.roster.Invalidate()
+	}
 	if err != nil {
-		s.logAudit("billing plan change rejected", sl, req.ProductID, userName, err.Error())
+		s.logAudit("billing plan change failed", sl, req.ProductID, user, err.Error())
 		writeJSON(w, http.StatusBadGateway, apiError{err.Error()})
 		return
 	}
-	s.logAudit("billing plan change attempted", sl, req.ProductID, userName, "")
-	if err := s.billing.UpdatePlan(ctx, subRef, req.ProductID, false); err != nil {
-		s.logAudit("billing plan change failed", sl, req.ProductID, userName, err.Error())
-		writeJSON(w, http.StatusBadGateway, apiError{err.Error()})
-		return
+	s.logAudit("billing plan change applied", sl, req.ProductID, user, fmt.Sprintf("scheduled=%t", schedule))
+	msg := fmt.Sprintf("Plan change to %q applied (immediate, prorated). It may take a few minutes to show up.", want)
+	if schedule {
+		when := "the next billing cycle"
+		if !target.ScheduledEffective.IsZero() {
+			when = target.ScheduledEffective.UTC().Format("2006-01-02")
+		}
+		msg = fmt.Sprintf("Plan change to %q scheduled for %s.", want, when)
 	}
-	s.logAudit("billing plan change applied", sl, req.ProductID, userName, "")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"message": fmt.Sprintf("Plan change to %q applied (immediate, prorated). It may take a few minutes to show up.", target.Product.Description),
-	})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "scheduled": schedule, "message": msg})
 }
 
 // handleBillingResume resumes a paused subscription line after a typed
-// "RESUME" confirmation.
+// "RESUME" confirmation (exact, case-sensitive).
 func (s *Server) handleBillingResume(w http.ResponseWriter, r *http.Request) {
 	if !s.billingClientOK(w) {
 		return
 	}
-	if !sameSiteOK(r) {
-		writeJSON(w, http.StatusForbidden, apiError{"cross-site request rejected"})
+	req, ok := decodeBillingRequest(w, r)
+	if !ok {
 		return
 	}
 	sl := r.PathValue("sl")
-	var req billingChangeRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError{"invalid body"})
-		return
+	user := auditUser(r)
+	reject := func(status int, msg string) {
+		s.logAudit("billing resume rejected", sl, "", user, msg)
+		writeJSON(w, status, apiError{msg})
 	}
 	if strings.TrimSpace(req.Confirm) != "RESUME" {
-		writeJSON(w, http.StatusBadRequest, apiError{`confirmation must be exactly "RESUME"`})
+		reject(http.StatusBadRequest, `confirmation must be exactly "RESUME"`)
 		return
 	}
-	user, _ := auth.UserFromContext(r.Context())
-	userName := "<unknown>"
-	if user != nil {
-		userName = user.Name
+	unlock, ok := s.lockBillingLine(sl)
+	if !ok {
+		reject(http.StatusConflict, "another billing change for this service line is in progress")
+		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer unlock()
+
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), billingMutationTimeout)
 	defer cancel()
 
-	subRef, err := s.subscriptionRefFor(ctx, sl)
+	line, err := s.serviceLineFor(ctx, sl)
 	if err != nil {
-		s.logAudit("billing resume rejected", sl, "", userName, err.Error())
+		reject(http.StatusNotFound, err.Error())
+		return
+	}
+	sub := line.Subscription
+	if sub == nil || sub.ReferenceID == "" {
+		reject(http.StatusConflict, "no subscription reference for "+sl)
+		return
+	}
+	if !sub.CanResume {
+		reject(http.StatusConflict, "the account does not offer a resume for this service line")
+		return
+	}
+	s.logAudit("billing resume attempted", sl, "", user, "")
+	err = s.billing.Resume(ctx, sub.ReferenceID)
+	s.billing.Invalidate(sl)
+	if s.roster != nil {
+		s.roster.Invalidate()
+	}
+	if err != nil {
+		s.logAudit("billing resume failed", sl, "", user, err.Error())
 		writeJSON(w, http.StatusBadGateway, apiError{err.Error()})
 		return
 	}
-	s.logAudit("billing resume attempted", sl, "", userName, "")
-	if err := s.billing.Resume(ctx, subRef); err != nil {
-		s.logAudit("billing resume failed", sl, "", userName, err.Error())
-		writeJSON(w, http.StatusBadGateway, apiError{err.Error()})
-		return
-	}
-	s.logAudit("billing resume applied", sl, "", userName, "")
+	s.logAudit("billing resume applied", sl, "", user, "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
 		"message": "Service line resumed. It may take a few minutes to become active.",
 	})
 }
 
-// subscriptionRefFor resolves the subscription UUID for a service line
-// from the roster; plan mutations address the line by that UUID.
-func (s *Server) subscriptionRefFor(ctx context.Context, serviceLine string) (string, error) {
+// serviceLineFor finds a service line on the account roster; billing
+// endpoints only ever address lines that belong to the account.
+func (s *Server) serviceLineFor(ctx context.Context, serviceLine string) (*starlink.ServiceLine, error) {
 	if s.roster == nil {
-		return "", fmt.Errorf("roster unavailable")
+		return nil, fmt.Errorf("roster unavailable")
 	}
 	lines, err := s.roster.Get(ctx)
 	if err != nil {
-		return "", fmt.Errorf("roster unavailable: %w", err)
+		return nil, fmt.Errorf("roster unavailable: %w", err)
 	}
 	for _, line := range lines {
-		if line.Number == serviceLine {
-			if line.Subscription == nil || line.Subscription.ReferenceID == "" {
-				return "", fmt.Errorf("no subscription reference for %s", serviceLine)
-			}
-			return line.Subscription.ReferenceID, nil
+		if serviceLine != "" && line.Number == serviceLine {
+			return line, nil
 		}
 	}
-	return "", fmt.Errorf("unknown service line %s", serviceLine)
+	return nil, fmt.Errorf("unknown service line %q", serviceLine)
+}
+
+// lockBillingLine serializes mutations per service line so a double submit
+// (or two admins) cannot fire two plan changes concurrently.
+func (s *Server) lockBillingLine(sl string) (func(), bool) {
+	s.billingMu.Lock()
+	defer s.billingMu.Unlock()
+	if s.billingBusy == nil {
+		s.billingBusy = map[string]bool{}
+	}
+	if s.billingBusy[sl] {
+		return nil, false
+	}
+	s.billingBusy[sl] = true
+	return func() {
+		s.billingMu.Lock()
+		delete(s.billingBusy, sl)
+		s.billingMu.Unlock()
+	}, true
+}
+
+// auditUser identifies the acting user for the audit log (never tokens).
+func auditUser(r *http.Request) string {
+	u, _ := auth.UserFromContext(r.Context())
+	if u == nil {
+		return "<unknown>"
+	}
+	for _, v := range []string{u.Email, u.Name, u.Sub} {
+		if v != "" {
+			return v
+		}
+	}
+	return "<unknown>"
 }
 
 // logAudit writes an auditable billing mutation event (plan, service line,
 // outcome — never credentials).
 func (s *Server) logAudit(event, serviceLine, plan, user, detail string) {
-	args := []any{"serviceLine", serviceLine, "user", user}
+	args := []any{"audit", "billing", "serviceLine", serviceLine, "user", user}
 	if plan != "" {
 		args = append(args, "plan", plan)
 	}

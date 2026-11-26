@@ -17,10 +17,11 @@
     return Math.round(s / 3600) + "h ago";
   }
 
+  // esc escapes text for HTML element content and quoted attribute values.
   function esc(s) {
-    var d = document.createElement("div");
-    d.textContent = s == null ? "" : String(s);
-    return d.innerHTML;
+    return (s == null ? "" : String(s))
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
   function restoreSummary(summary) {
@@ -404,12 +405,15 @@
     if (action === "billing_resume") {
       ev.preventDefault();
       var sl = btn.getAttribute("data-sl");
-      var typed = prompt("This resumes a paused subscription line and restarts billing immediately.\nType RESUME to confirm:");
+      var typed = prompt("This resumes a paused subscription line and restarts billing immediately.\nType RESUME (in capitals) to confirm:");
       if (typed === null) return;
-      if (typed.trim().toUpperCase() !== "RESUME") { showBillingOutcome(false, 'Confirmation must be exactly "RESUME".'); return; }
+      typed = typed.trim();
+      if (typed !== "RESUME") { showBillingOutcome(false, 'Confirmation must be exactly "RESUME".'); return; }
       setBillingButtons(true);
-      postJSON("/api/billing/line/" + encodeURIComponent(sl) + "/resume", { confirm: "RESUME" })
-        .then(function (r) { showBillingOutcome(r.ok && r.body.ok, r.body.ok ? r.body.message : (r.body.error || "request failed (HTTP " + r.status + ")")); })
+      showBillingOutcome(null, "Resuming service line…");
+      // Send what was typed; the server performs the authoritative check.
+      postJSON("/api/billing/line/" + encodeURIComponent(sl) + "/resume", { confirm: typed })
+        .then(function (r) { showBillingOutcome(!!(r.ok && r.body.ok), r.body.ok ? r.body.message : (r.body.error || "request failed (HTTP " + r.status + ")")); })
         .then(function () { setBillingButtons(false); });
       return;
     }
@@ -457,24 +461,31 @@
     });
   }
 
+  // ok: true (success), false (error) or null (neutral progress message).
   function showBillingOutcome(ok, text) {
     var box = document.getElementById("billing-outcome");
     if (!box) return;
     box.hidden = false;
-    box.className = "outcome " + (ok ? "ok" : "err");
-    box.textContent = (ok ? "✓ " : "✗ ") + text;
+    box.className = "outcome" + (ok === true ? " ok" : ok === false ? " err" : "");
+    box.textContent = (ok === true ? "✓ " : ok === false ? "✗ " : "") + text;
+  }
+
+  function money(v, currency) {
+    return typeof v === "number" ? v.toFixed(2) + " " + (currency || "") : "price unknown";
   }
 
   // Plan-change modal: fetch options, pick a plan, then a strong
   // double-confirmation (checkbox + typing the exact plan name) before the
   // POST. The server re-validates the typed name against the live options.
   function openPlanChangeModal(sl) {
-    showBillingOutcome(true, "Loading available plans…");
+    showBillingOutcome(null, "Loading available plans…");
     fetchJSON("/api/billing/line/" + encodeURIComponent(sl) + "/options").then(function (r) {
       if (!r.ok) {
         showBillingOutcome(false, r.body && r.body.error ? r.body.error : "Could not load plan options (HTTP " + r.status + ")");
         return;
       }
+      var box = document.getElementById("billing-outcome");
+      if (box) box.hidden = true;
       buildPlanChangeDialog(sl, r.body);
     });
   }
@@ -482,37 +493,57 @@
   function buildPlanChangeDialog(sl, opts) {
     var current = opts.current || {};
     var options = opts.options || [];
+    var currentName = current.description || "";
     var dlg = document.createElement("dialog");
     dlg.className = "billing-dialog";
     var html = '<form method="dialog" id="plan-change-form">' +
       '<h2>Change plan</h2>' +
       '<p class="muted">Service line <span class="mono">' + esc(sl) + '</span> · ' +
-      'current plan: <strong>' + esc(current.description || "unknown") + '</strong>' +
-      (current.price ? ' (' + esc(String(current.price)) + ' ' + esc(current.currency || "") + '/month)' : '') + '</p>' +
-      '<p class="muted">A plan change takes effect immediately and affects real billing. ' +
-      'Prices include the recurring monthly amount; switching mid-cycle applies a prorated one-time charge.</p>' +
+      'current plan: <strong>' + esc(currentName || "unknown") + '</strong> (' + esc(money(current.price, current.currency)) + '/month)</p>' +
+      (opts.pending ? '<p class="muted">A change to <strong>' + esc(opts.pending.description || opts.pending.productId) + '</strong> is already pending.</p>' : '') +
+      '<p class="muted">Plan changes affect real billing. Options marked “immediate” apply now with a prorated one-time charge; ' +
+      'options marked “next billing cycle” are scheduled and take effect on the date shown.</p>' +
       '<fieldset><legend>Available plans</legend>';
-    options.forEach(function (opt, i) {
+    var selectable = 0;
+    options.forEach(function (opt) {
       var p = opt.product || {};
-      var detail = (p.price ? esc(String(p.price)) + " " + esc(p.currency || "") + "/month" : "price unknown");
-      if (opt.scheduledEffective) detail += " · effective " + esc(String(opt.scheduledEffective).slice(0, 10));
-      if (opt.immediateOneTime) detail += " · prorated one-time " + esc(String(opt.immediateOneTime)) + " " + esc(p.currency || "");
-      if (p.isStandby) detail += " · standby/pause mode";
-      html += '<label class="plan-option"><input type="radio" name="plan" value="' + esc(p.productId || "") + '"' + (i === 0 ? " checked" : "") + '> ' +
-        '<span><strong>' + esc(p.description || p.productId || "unknown plan") + '</strong><br><span class="muted">' + detail + '</span></span></label>';
+      var cur = !!opt.isCurrent;
+      var applicable = !cur && (opt.hasImmediate || opt.hasScheduled);
+      var detail = esc(money(p.price, p.currency)) + "/month";
+      if (opt.hasImmediate) {
+        detail += " · immediate, prorated one-time " + esc(money(opt.immediateOneTime, p.currency));
+      } else if (opt.hasScheduled) {
+        detail += " · next billing cycle" + (opt.scheduledEffective ? " (" + esc(String(opt.scheduledEffective).slice(0, 10)) + ")" : "");
+      }
+      if (p.isStandby) detail += " · standby mode";
+      if (cur) detail += " · this is the current plan";
+      else if (currentName && p.description === currentName) detail += " · same name as the current plan, different product/price";
+      if (applicable) selectable++;
+      html += '<label class="plan-option' + (applicable ? '' : ' plan-option-disabled') + '">' +
+        '<input type="radio" name="plan" value="' + esc(p.productId || "") + '"' + (applicable ? '' : ' disabled') + '> ' +
+        '<span><strong>' + esc(p.description || p.productId || "unknown plan") + '</strong>' +
+        (cur ? ' <span class="pill pill-ok">current</span>' : '') +
+        '<br><span class="muted">' + detail + '</span>' +
+        (p.productId ? '<br><span class="muted mono">' + esc(p.productId) + '</span>' : '') + '</span></label>';
     });
-    if (!options.length) html += '<p class="muted">No plan change options are currently offered for this line.</p>';
+    if (!selectable) html += '<p class="muted">No plan change options are currently offered for this line.</p>';
     html += '</fieldset>' +
       '<label class="plan-confirm-check"><input type="checkbox" id="plan-confirm-check"> I understand this changes real billing for this service line.</label>' +
-      '<label>Type the exact name of the selected plan to confirm:<br>' +
+      '<label>Type the exact name of the selected plan (case-sensitive) to confirm:<br>' +
       '<input type="text" id="plan-confirm-text" autocomplete="off" spellcheck="false"></label>' +
+      '<p class="outcome err" id="plan-error" role="alert" hidden></p>' +
       '<div class="dialog-buttons">' +
       '<button type="button" class="btn" id="plan-cancel">Cancel</button>' +
-      '<button type="submit" class="btn btn-danger" id="plan-apply">Apply plan change</button>' +
+      '<button type="submit" class="btn btn-danger" id="plan-apply"' + (selectable ? '' : ' disabled') + '>Apply plan change</button>' +
       '</div></form>';
     dlg.innerHTML = html;
     document.body.appendChild(dlg);
 
+    function dialogError(text) {
+      var el = dlg.querySelector("#plan-error");
+      el.hidden = false;
+      el.textContent = "✗ " + text;
+    }
     function selectedOption() {
       var checked = dlg.querySelector("input[name=plan]:checked");
       if (!checked) return null;
@@ -525,25 +556,24 @@
     dlg.querySelector("#plan-change-form").addEventListener("submit", function (ev) {
       ev.preventDefault();
       var opt = selectedOption();
-      if (!opt) { showBillingOutcome(false, "Select a plan first."); return; }
+      if (!opt || opt.isCurrent) { dialogError("Select a plan first."); return; }
       if (!dlg.querySelector("#plan-confirm-check").checked) {
-        showBillingOutcome(false, "Tick the confirmation checkbox first.");
+        dialogError("Tick the confirmation checkbox first.");
         return;
       }
       var typed = dlg.querySelector("#plan-confirm-text").value.trim();
       var target = (opt.product || {}).description || "";
-      if (!target || typed.toLowerCase() !== target.toLowerCase()) {
-        showBillingOutcome(false, 'Typed confirmation does not match the plan name "' + target + '".');
+      if (!target || typed !== target) {
+        dialogError('Typed confirmation does not exactly match the plan name "' + target + '".');
         return;
       }
       var productId = opt.product.productId;
       dlg.close();
-      dlg.remove();
       setBillingButtons(true);
-      showBillingOutcome(true, "Applying plan change…");
+      showBillingOutcome(null, opt.hasImmediate ? "Applying plan change…" : "Scheduling plan change…");
       postJSON("/api/billing/line/" + encodeURIComponent(sl) + "/change", { productId: productId, confirm: typed })
         .then(function (r) {
-          showBillingOutcome(r.ok && r.body.ok, r.body.ok ? r.body.message : (r.body.error || "request failed (HTTP " + r.status + ")"));
+          showBillingOutcome(!!(r.ok && r.body.ok), r.body.ok ? r.body.message : (r.body.error || "request failed (HTTP " + r.status + ")"));
         })
         .then(function () { setBillingButtons(false); });
     });
