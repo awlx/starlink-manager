@@ -68,6 +68,7 @@ type fakeAPI struct {
 	mutationLoc     string
 	changeCount     int
 	resumeCount     int
+	rosterCount     int
 	// mutation capture: method+path of subscription update/resume calls.
 	mutations []string
 }
@@ -124,6 +125,9 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
 	})
 
 	mux.HandleFunc("/webagg/v2/accounts/service-lines", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.rosterCount++
+		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"content":{"totalCount":1,"pageIndex":0,"limit":100,"isLastPage":true,"results":[{
 			"serviceLineNumber": "SL-TEST-1",

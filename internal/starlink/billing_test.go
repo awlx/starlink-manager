@@ -483,3 +483,77 @@ func TestCheckWebaggEnvelope(t *testing.T) {
 		t.Errorf("empty mutation body accepted: %v", err)
 	}
 }
+
+// After a mutation the account-data caches must be cleared: the billing
+// change-options cache of the affected line and the roster cache, exactly
+// as the web mutation handler does. Both must hit the server again on the
+// next read.
+func TestAccountCachesClearedAfterMutation(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	f.changeOptionsBody = changeOptionsFixture
+	clock := &fakeClock{now: time.Now()}
+	s := newTestSession(t, ts, clock)
+	b := NewBilling(s, ts.URL, testLogger(t))
+	roster := NewRoster(s, ts.URL, time.Minute, testLogger(t))
+	ctx := context.Background()
+
+	// Warm both caches.
+	if _, err := b.GetChangeOptions(ctx, "SL-TEST-1"); err != nil {
+		t.Fatalf("GetChangeOptions: %v", err)
+	}
+	if _, err := roster.Get(ctx); err != nil {
+		t.Fatalf("roster.Get: %v", err)
+	}
+	f.mu.Lock()
+	opts0, roster0 := f.changeOptionsCount, f.rosterCount
+	f.mu.Unlock()
+	if opts0 != 1 || roster0 != 1 {
+		t.Fatalf("setup: caches not warmed (options=%d roster=%d)", opts0, roster0)
+	}
+
+	// Mutate and clear, mirroring the web mutation handler.
+	if _, err := b.UpdatePlan(ctx, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "de-test-plan-100", false); err != nil {
+		t.Fatalf("UpdatePlan: %v", err)
+	}
+	b.Invalidate("SL-TEST-1")
+	roster.Invalidate()
+
+	// Both caches must refetch immediately despite the TTL.
+	if _, err := b.GetChangeOptions(ctx, "SL-TEST-1"); err != nil {
+		t.Fatalf("GetChangeOptions after mutation: %v", err)
+	}
+	if _, err := roster.Get(ctx); err != nil {
+		t.Fatalf("roster.Get after mutation: %v", err)
+	}
+	f.mu.Lock()
+	opts1, roster1 := f.changeOptionsCount, f.rosterCount
+	f.mu.Unlock()
+	if opts1 != 2 {
+		t.Errorf("change-options fetched %d times after mutation, want 2", opts1)
+	}
+	if roster1 != 2 {
+		t.Errorf("roster fetched %d times after mutation, want 2", roster1)
+	}
+
+	// A resume clears too.
+	if err := b.Resume(ctx, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	b.Invalidate("SL-TEST-1")
+	roster.Invalidate()
+	if _, err := b.GetChangeOptions(ctx, "SL-TEST-1"); err != nil {
+		t.Fatalf("GetChangeOptions after resume: %v", err)
+	}
+	f.mu.Lock()
+	opts2 := f.changeOptionsCount
+	f.mu.Unlock()
+	if opts2 != 3 {
+		t.Errorf("change-options fetched %d times after resume, want 3", opts2)
+	}
+}
+
+// Invalidate must also work for a line that was never cached.
+func TestBillingInvalidateUnknownLine(t *testing.T) {
+	b := NewBilling(nil, "https://api.example.test", testLogger(t))
+	b.Invalidate("SL-NEVER-CACHED") // must not panic
+}
