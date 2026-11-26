@@ -1,11 +1,14 @@
 package starlink
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -170,6 +173,9 @@ func (b *Billing) fetchChangeOptions(ctx context.Context, serviceLine string) (*
 	if err != nil {
 		return nil, fmt.Errorf("fetching change options for %s: %w", serviceLine, err)
 	}
+	if err := checkWebaggEnvelope(data); err != nil {
+		return nil, fmt.Errorf("change options for %s: %w", serviceLine, err)
+	}
 	opts, err := parseChangeOptions(data)
 	if err != nil {
 		return nil, fmt.Errorf("parsing change options for %s: %w", serviceLine, err)
@@ -180,35 +186,180 @@ func (b *Billing) fetchChangeOptions(ctx context.Context, serviceLine string) (*
 
 // UpdatePlan changes the plan of a subscription line. With schedule=false
 // (verified endpoint form) the change applies immediately with a prorated
-// charge; with schedule=true it applies at the next billing cycle.
-func (b *Billing) UpdatePlan(ctx context.Context, subRefID, productID string, schedule bool) error {
+// charge; with schedule=true it applies at the next billing cycle. The
+// returned effective date is taken from the API response when it reports
+// one; nil means the date is unconfirmed.
+func (b *Billing) UpdatePlan(ctx context.Context, subRefID, productID string, schedule bool) (*time.Time, error) {
 	if subRefID == "" || productID == "" {
-		return fmt.Errorf("plan change needs a subscription reference and a product")
+		return nil, fmt.Errorf("plan change needs a subscription reference and a product")
 	}
 	u := fmt.Sprintf("%s/webagg/v1/public/subscriptions/line/%s/product/%s/update?schedule=%t",
 		b.apiBase, url.PathEscape(subRefID), url.PathEscape(productID), schedule)
-	_, _, err := b.session.request(ctx, "POST", u, []byte("{}"), "application/json")
+	resp, data, err := b.session.request(ctx, "POST", u, []byte("{}"), "application/json")
 	if err != nil {
 		b.logEvent("billing plan change failed", "subscription", subRefID, "plan", productID, "scheduled", schedule, "err", err)
-		return err
+		return nil, err
 	}
+	// Only a plain 200 confirms the mutation: redirects (e.g. an
+	// expired-cookie SSO redirect) and other non-200s are failures.
+	if resp.StatusCode != http.StatusOK {
+		err := fmt.Errorf("plan change answered HTTP %d (body: %s)", resp.StatusCode, truncateForLog(data))
+		b.logEvent("billing plan change failed", "subscription", subRefID, "plan", productID, "scheduled", schedule, "err", err)
+		return nil, err
+	}
+	if err := checkMutationEnvelope(data); err != nil {
+		b.logEvent("billing plan change rejected by the account API", "subscription", subRefID, "plan", productID, "scheduled", schedule, "err", err)
+		return nil, err
+	}
+	effective := parseUpdateEffectiveDate(data)
 	b.logEvent("billing plan change applied", "subscription", subRefID, "plan", productID, "scheduled", schedule)
-	return nil
+	return effective, nil
 }
 
-// Resume resumes a paused subscription line.
+// Resume resumes a paused subscription line. Like UpdatePlan it only
+// accepts an HTTP 200 with a valid webagg envelope as confirmation.
 func (b *Billing) Resume(ctx context.Context, subRefID string) error {
 	if subRefID == "" {
 		return fmt.Errorf("resume needs a subscription reference")
 	}
 	u := fmt.Sprintf("%s/webagg/v1/public/subscriptions/line/%s/resume", b.apiBase, url.PathEscape(subRefID))
-	_, _, err := b.session.request(ctx, "PUT", u, nil, "")
+	resp, data, err := b.session.request(ctx, "PUT", u, nil, "")
 	if err != nil {
 		b.logEvent("billing resume failed", "subscription", subRefID, "err", err)
 		return err
 	}
+	if resp.StatusCode != http.StatusOK {
+		err := fmt.Errorf("resume answered HTTP %d (body: %s)", resp.StatusCode, truncateForLog(data))
+		b.logEvent("billing resume failed", "subscription", subRefID, "err", err)
+		return err
+	}
+	if err := checkMutationEnvelope(data); err != nil {
+		b.logEvent("billing resume rejected by the account API", "subscription", subRefID, "err", err)
+		return err
+	}
 	b.logEvent("billing resume applied", "subscription", subRefID)
 	return nil
+}
+
+// checkMutationEnvelope is the strict variant used for mutations: a
+// non-empty body must be a JSON object (an HTML login page reached through
+// a followed redirect, or any other non-JSON payload, is a failure) and
+// must satisfy the webagg envelope rules. An empty body is accepted —
+// some endpoints answer bare 200s.
+func checkMutationEnvelope(data []byte) error {
+	body := bytes.TrimSpace(data)
+	if len(body) == 0 {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return fmt.Errorf("mutation response is not JSON (body: %s)", truncateForLog(data))
+	}
+	return checkWebaggEnvelope(data)
+}
+
+// checkWebaggEnvelope validates a webagg response body: the account API
+// wraps results in {"errors":[...], "isValid":bool, "content":...} and a
+// 200 status alone does not prove success — a body can carry business
+// errors or isValid=false. An empty body is accepted (some endpoints
+// answer bare 200s); anything parsed must not carry errors.
+func checkWebaggEnvelope(data []byte) error {
+	body := bytes.TrimSpace(data)
+	if len(body) == 0 {
+		return nil
+	}
+	var env struct {
+		Errors  []json.RawMessage `json:"errors"`
+		IsValid *bool             `json:"isValid"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		// Not a webagg envelope; the caller's own parsing decides.
+		return nil
+	}
+	if len(env.Errors) > 0 {
+		return fmt.Errorf("account API reported an error: %s", firstWebaggError(env.Errors))
+	}
+	if env.IsValid != nil && !*env.IsValid {
+		return errors.New("account API answered with isValid=false")
+	}
+	return nil
+}
+
+// firstWebaggError renders the first error entry, tolerating both object
+// errors ({code, message/description}) and plain strings.
+func firstWebaggError(errs []json.RawMessage) string {
+	for _, raw := range errs {
+		var obj struct {
+			Message     string `json:"message"`
+			Description string `json:"description"`
+			Code        string `json:"code"`
+		}
+		if err := json.Unmarshal(raw, &obj); err == nil {
+			switch {
+			case obj.Message != "":
+				return obj.Message
+			case obj.Description != "":
+				return obj.Description
+			case obj.Code != "":
+				return "code " + obj.Code
+			}
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil && s != "" {
+			return s
+		}
+	}
+	return "unknown error"
+}
+
+// parseUpdateEffectiveDate scans the update response content for an
+// effective timestamp so the UI can report the API-confirmed date instead
+// of the date from the pre-mutation option list. Returns nil when the
+// response does not confirm a date.
+func parseUpdateEffectiveDate(data []byte) *time.Time {
+	var env struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil || len(env.Content) == 0 {
+		return nil
+	}
+	var found time.Time
+	scanEffectiveDate(bytes.TrimSpace(env.Content), &found, 0)
+	if found.IsZero() {
+		return nil
+	}
+	return &found
+}
+
+// scanEffectiveDate walks a decoded JSON structure looking for an
+// "effectiveTimestamp" string; depth-bounded to stay cheap.
+func scanEffectiveDate(raw []byte, found *time.Time, depth int) {
+	if !found.IsZero() || depth > 6 {
+		return
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err == nil {
+		if tsRaw, ok := m["effectiveTimestamp"]; ok {
+			var ts string
+			if err := json.Unmarshal(tsRaw, &ts); err == nil && ts != "" {
+				if t, err := time.Parse(time.RFC3339, ts); err == nil {
+					*found = t
+					return
+				}
+			}
+		}
+		for _, v := range m {
+			scanEffectiveDate(v, found, depth+1)
+		}
+		return
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err == nil {
+		for _, v := range arr {
+			scanEffectiveDate(v, found, depth+1)
+		}
+	}
 }
 
 // logEvent logs a mutation outcome, tolerating a nil logger (tests).

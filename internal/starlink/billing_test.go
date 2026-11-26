@@ -271,10 +271,10 @@ func TestBillingMutations(t *testing.T) {
 	b := NewBilling(s, ts.URL, testLogger(t))
 	ctx := context.Background()
 
-	if err := b.UpdatePlan(ctx, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "de-test-plan-100", false); err != nil {
+	if _, err := b.UpdatePlan(ctx, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "de-test-plan-100", false); err != nil {
 		t.Fatalf("UpdatePlan: %v", err)
 	}
-	if err := b.UpdatePlan(ctx, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "de-test-standby", true); err != nil {
+	if _, err := b.UpdatePlan(ctx, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "de-test-standby", true); err != nil {
 		t.Fatalf("UpdatePlan scheduled: %v", err)
 	}
 	if err := b.Resume(ctx, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"); err != nil {
@@ -284,7 +284,7 @@ func TestBillingMutations(t *testing.T) {
 	// Errors on mutations surface (fake returns 200; use a failing session
 	// path by pointing at a dead URL).
 	dead := NewBilling(s, "http://127.0.0.1:1", testLogger(t))
-	if err := dead.UpdatePlan(ctx, "ref", "plan", false); err == nil {
+	if _, err := dead.UpdatePlan(ctx, "ref", "plan", false); err == nil {
 		t.Error("UpdatePlan against unreachable host must error")
 	}
 	if err := dead.Resume(ctx, "ref"); err == nil {
@@ -297,8 +297,8 @@ func TestBillingMutationPaths(t *testing.T) {
 	s := newTestSession(t, ts, &fakeClock{now: time.Now()})
 	b := NewBilling(s, ts.URL, testLogger(t))
 	ctx := context.Background()
-	_ = b.UpdatePlan(ctx, "sub-1", "plan-a", false)
-	_ = b.UpdatePlan(ctx, "sub-1", "plan-b", true)
+	_, _ = b.UpdatePlan(ctx, "sub-1", "plan-a", false)
+	_, _ = b.UpdatePlan(ctx, "sub-1", "plan-b", true)
 	_ = b.Resume(ctx, "sub-1")
 
 	f.mu.Lock()
@@ -321,11 +321,11 @@ func TestBillingEscapesIdentifiers(t *testing.T) {
 	s := newTestSession(t, ts, &fakeClock{now: time.Now()})
 	b := NewBilling(s, ts.URL, testLogger(t))
 	ctx := context.Background()
-	_ = b.UpdatePlan(ctx, "../x", "a/b?c", false)
-	if err := b.UpdatePlan(ctx, "", "plan", false); err == nil {
+	_, _ = b.UpdatePlan(ctx, "../x", "a/b?c", false)
+	if _, err := b.UpdatePlan(ctx, "", "plan", false); err == nil {
 		t.Error("empty subscription reference must error")
 	}
-	if err := b.UpdatePlan(ctx, "sub", "", false); err == nil {
+	if _, err := b.UpdatePlan(ctx, "sub", "", false); err == nil {
 		t.Error("empty product must error")
 	}
 	if err := b.Resume(ctx, ""); err == nil {
@@ -360,5 +360,126 @@ func TestBillingFreshBypassesCache(t *testing.T) {
 	f.mu.Unlock()
 	if count != 3 {
 		t.Errorf("hits = %d, want 3 (initial, fresh, after invalidate)", count)
+	}
+}
+
+// ---------- response interpretation ----------
+
+// A mutation must succeed only on HTTP 200 with a sane body. The fake
+// mirrors the expired-cookie SSO redirect: 302 to a login page; the HTTP
+// client follows it and lands on a 200 HTML page, which must NOT be
+// reported as an applied mutation.
+func TestBillingMutationRedirectIsFailure(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	f.mutationStatus = 302
+	f.mutationLoc = "/login"
+	s := newTestSession(t, ts, &fakeClock{now: time.Now()})
+	b := NewBilling(s, ts.URL, testLogger(t))
+	ctx := context.Background()
+
+	if _, err := b.UpdatePlan(ctx, "sub-1", "plan-a", false); err == nil {
+		t.Error("UpdatePlan on SSO redirect (200 HTML after following) must fail")
+	} else if !strings.Contains(err.Error(), "not JSON") && !strings.Contains(err.Error(), "HTTP 302") && !strings.Contains(err.Error(), "HTTP 200") {
+		t.Errorf("redirect failure should name the cause, got: %v", err)
+	}
+	f.mu.Lock()
+	errs := f.resumeCount + f.changeCount
+	f.mu.Unlock()
+	if errs < 1 {
+		t.Error("mutation must have been attempted")
+	}
+	if err := b.Resume(ctx, "sub-1"); err == nil {
+		t.Error("Resume on SSO redirect must fail")
+	}
+}
+
+// A 200 envelope carrying business errors or isValid=false is a rejected
+// mutation, not a success.
+func TestBillingMutationErrorEnvelopeIsFailure(t *testing.T) {
+	_, ts := newFakeAPI(t)
+	s := newTestSession(t, ts, &fakeClock{now: time.Now()})
+	ctx := context.Background()
+
+	cases := []string{
+		`{"errors":[{"code":"ERR-1","message":"plan not changeable"}],"isValid":false,"content":null}`,
+		`{"errors":[],"isValid":false,"content":{"subscription":{}}}`,
+	}
+	for i, body := range cases {
+		f, ts := newFakeAPI(t)
+		f.mutationBody = body
+		b := NewBilling(s, ts.URL, testLogger(t))
+		if _, err := b.UpdatePlan(ctx, "sub-1", "plan-a", false); err == nil {
+			t.Errorf("case %d: UpdatePlan with error envelope must fail", i)
+		} else if i == 0 && !strings.Contains(err.Error(), "plan not changeable") {
+			t.Errorf("case %d: first error message should surface, got: %v", i, err)
+		}
+		if err := b.Resume(ctx, "sub-1"); err == nil {
+			t.Errorf("case %d: Resume with error envelope must fail", i)
+		}
+		ts.Close()
+		_ = f
+	}
+}
+
+// A valid 200 envelope confirms the mutation.
+func TestBillingMutationSuccessEnvelope(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	f.mutationBody = `{"errors":[],"isValid":true,"content":{"subscription":{"subscriptionReferenceId":"sub-1","productId":"plan-a"}}}`
+	s := newTestSession(t, ts, &fakeClock{now: time.Now()})
+	b := NewBilling(s, ts.URL, testLogger(t))
+	ctx := context.Background()
+	if _, err := b.UpdatePlan(ctx, "sub-1", "plan-a", false); err != nil {
+		t.Errorf("valid envelope must succeed, got %v", err)
+	}
+	if err := b.Resume(ctx, "sub-1"); err != nil {
+		t.Errorf("valid envelope must succeed, got %v", err)
+	}
+}
+
+// The update response may confirm the effective date; prefer it over the
+// pre-mutation option list.
+func TestParseUpdateEffectiveDate(t *testing.T) {
+	if got := parseUpdateEffectiveDate([]byte(`{"content":{"subscription":{"delayedProductId":"x","effectiveTimestamp":"2027-01-01T00:00:00+00:00"}}}`)); got == nil || !got.Equal(time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("nested effectiveTimestamp: got %v", got)
+	}
+	if got := parseUpdateEffectiveDate([]byte(`{"content":{"effectiveTimestamp":"2027-02-01T00:00:00+00:00"}}`)); got == nil {
+		t.Error("top-level effectiveTimestamp should be found")
+	}
+	if got := parseUpdateEffectiveDate([]byte(`{"content":{"subscription":{}}}`)); got != nil {
+		t.Errorf("no date: got %v, want nil", got)
+	}
+	if got := parseUpdateEffectiveDate([]byte(`{"content":null}`)); got != nil {
+		t.Errorf("null content: got %v, want nil", got)
+	}
+	if got := parseUpdateEffectiveDate([]byte(`not json`)); got != nil {
+		t.Errorf("non-JSON: got %v, want nil", got)
+	}
+}
+
+func TestCheckWebaggEnvelope(t *testing.T) {
+	if err := checkWebaggEnvelope([]byte(`{"errors":[],"isValid":true}`)); err != nil {
+		t.Errorf("clean envelope: %v", err)
+	}
+	if err := checkWebaggEnvelope([]byte(`{"errors":[{"message":"boom"}],"isValid":true}`)); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("errors array must fail with message, got %v", err)
+	}
+	var bad bool
+	if err := checkWebaggEnvelope([]byte(`{"isValid":false}`)); err == nil {
+		t.Error("isValid=false must fail")
+	} else {
+		bad = err != nil
+	}
+	_ = bad
+	if err := checkWebaggEnvelope([]byte(``)); err != nil {
+		t.Errorf("empty body accepted: %v", err)
+	}
+	if err := checkWebaggEnvelope([]byte(`<html>not webagg</html>`)); err != nil {
+		t.Errorf("non-envelope body is left to caller parsing: %v", err)
+	}
+	if err := checkMutationEnvelope([]byte(`<html>login page</html>`)); err == nil || !strings.Contains(err.Error(), "not JSON") {
+		t.Errorf("HTML mutation body must fail, got %v", err)
+	}
+	if err := checkMutationEnvelope([]byte(``)); err != nil {
+		t.Errorf("empty mutation body accepted: %v", err)
 	}
 }

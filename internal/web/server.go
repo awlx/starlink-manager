@@ -1575,7 +1575,7 @@ func (s *Server) handleBillingChange(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logAudit("billing plan change attempted", sl, req.ProductID, user, fmt.Sprintf("scheduled=%t", schedule))
-	err = s.billing.UpdatePlan(ctx, sub.ReferenceID, req.ProductID, schedule)
+	effective, err := s.billing.UpdatePlan(ctx, sub.ReferenceID, req.ProductID, schedule)
 	// Whatever the outcome, the cached plan data may now be outdated.
 	s.billing.Invalidate(sl)
 	if s.roster != nil {
@@ -1589,8 +1589,14 @@ func (s *Server) handleBillingChange(w http.ResponseWriter, r *http.Request) {
 	s.logAudit("billing plan change applied", sl, req.ProductID, user, fmt.Sprintf("scheduled=%t", schedule))
 	msg := fmt.Sprintf("Plan change to %q applied (immediate, prorated). It may take a few minutes to show up.", want)
 	if schedule {
+		// Prefer the date the update response confirms; fall back to the
+		// date from the option list, then to a generic phrase. The
+		// response date is only available when the envelope check passed.
 		when := "the next billing cycle"
-		if !target.ScheduledEffective.IsZero() {
+		switch {
+		case effective != nil:
+			when = effective.UTC().Format("2006-01-02")
+		case !target.ScheduledEffective.IsZero():
 			when = target.ScheduledEffective.UTC().Format("2006-01-02")
 		}
 		msg = fmt.Sprintf("Plan change to %q scheduled for %s.", want, when)

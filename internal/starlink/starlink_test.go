@@ -62,6 +62,12 @@ type fakeAPI struct {
 	changeOptionsCount  int
 	changeOptionsBody   string
 	changeOptionsStatus int
+	// mutation behavior: status/body override and location for redirects.
+	mutationStatus  int
+	mutationBody    string
+	mutationLoc     string
+	changeCount     int
+	resumeCount     int
 	// mutation capture: method+path of subscription update/resume calls.
 	mutations []string
 }
@@ -174,9 +180,31 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
 			path += "?" + r.URL.RawQuery
 		}
 		f.mutations = append(f.mutations, r.Method+" "+path)
+		status, body, loc := f.mutationStatus, f.mutationBody, f.mutationLoc
+		if strings.Contains(path, "/resume") {
+			f.resumeCount++
+		} else {
+			f.changeCount++
+		}
 		f.mu.Unlock()
+		if status == 0 {
+			status = 200
+		}
+		if loc != "" {
+			w.Header().Set("Location", loc)
+		}
+		if body == "" && status == 200 {
+			body = `{"isValid":true}`
+		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"isValid":true}`)
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+	})
+
+	// Redirect target for expired-cookie SSO redirects: an HTML login page.
+	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, "<html><body>Sign in to continue</body></html>")
 	})
 
 	mux.HandleFunc("/device-data/cache/v1/telemetry", func(w http.ResponseWriter, r *http.Request) {
@@ -556,7 +584,7 @@ func TestSessionDeadRecovery(t *testing.T) {
 func TestMarkAliveEndsRecoveryWindow(t *testing.T) {
 	_, ts := newFakeAPI(t)
 	s := newTestSession(t, ts, &fakeClock{now: time.Now()})
-	s.recoveryProbe.Store(true)
+	s.armRecovery()
 	s.MarkAlive()
 	s.mu.Lock()
 	s.latchDeadLocked()
