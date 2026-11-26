@@ -1256,3 +1256,79 @@ func TestRecoveryProbeFailsOnceLatchesImmediately(t *testing.T) {
 		t.Fatal("session should be recovered")
 	}
 }
+
+// A recovery window armed by a path that returned a token without a
+// liveness proof (e.g. renewal failed inside the probe window) must not
+// make an unrelated later 401 latch dead in one strike once the window
+// has expired.
+func TestStaleRecoveryArmDoesNotOneStrike(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	clock := &fakeClock{now: time.Now()}
+	s := newTestSession(t, ts, clock)
+	oldCooldown := deadCooldown
+	deadCooldown = time.Minute
+	t.Cleanup(func() { deadCooldown = oldCooldown })
+
+	// Latch dead with two failed probes, then recover with a successful
+	// probe: this arms the recovery window.
+	f.mu.Lock()
+	f.probeStatus = 401
+	f.mu.Unlock()
+	_, _ = s.Token(context.Background())
+	clock.Advance(probeMinInterval + time.Second)
+	_, _ = s.Token(context.Background())
+	if !s.SessionDead() {
+		t.Fatal("setup: two failures must latch")
+	}
+	clock.Advance(2 * time.Minute)
+	f.mu.Lock()
+	f.probeStatus = 200
+	f.mu.Unlock()
+	if _, err := s.Token(context.Background()); err != nil {
+		t.Fatalf("setup: recovery probe failed: %v", err)
+	}
+	if s.SessionDead() {
+		t.Fatal("setup: session should be recovered")
+	}
+
+	// Simulate the leak path directly: a recovery arming that never got
+	// proven by a data call (no MarkAlive), then let the window expire.
+	s.mu.Lock()
+	s.armRecovery()
+	s.mu.Unlock()
+	clock.Advance(deadCooldown + time.Minute)
+	if s.recoveryArmed() {
+		t.Fatal("expired arm must be treated as disarmed")
+	}
+
+	// One unrelated failure now counts like any other and must not latch.
+	f.mu.Lock()
+	f.probeStatus = 401
+	f.mu.Unlock()
+	clock.Advance(probeMinInterval + time.Second)
+	_, _ = s.Token(context.Background())
+	if s.SessionDead() {
+		t.Fatal("a single unrelated failure after an expired recovery arm must not latch immediately")
+	}
+}
+
+// A failed probe on a FRESH recovery window still latches in one strike.
+func TestFreshRecoveryArmStillOneStrikes(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	clock := &fakeClock{now: time.Now()}
+	s := newTestSession(t, ts, clock)
+	oldCooldown := deadCooldown
+	deadCooldown = time.Minute
+	t.Cleanup(func() { deadCooldown = oldCooldown })
+
+	s.mu.Lock()
+	s.armRecovery()
+	s.mu.Unlock()
+	f.mu.Lock()
+	f.probeStatus = 401
+	f.mu.Unlock()
+	_, _ = s.Token(context.Background())
+	if !s.SessionDead() {
+		t.Fatal("a failure on a fresh recovery window must latch immediately")
+	}
+}

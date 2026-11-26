@@ -73,12 +73,18 @@ type Session struct {
 	// dead so a flaky API does not spin probes forever.
 	probeFailures atomic.Int32
 
-	// recoveryProbe is set while a post-cooldown recovery probe is in
-	// flight; a failure on that probe latches dead immediately (one
-	// strike) so the app does not flap between probing and failing. It is
-	// cleared by any successful authenticated call (clearDead), which can
-	// happen without s.mu (MarkAlive), hence atomic.
-	recoveryProbe atomic.Bool
+	// recoveryProbeAt is the unix time at which a recovery attempt armed
+	// the one-strike latch, or 0 when nothing is armed. A failed probe on
+	// a freshly armed recovery latches dead immediately (one strike) so
+	// the app does not flap between probing and failing. The window is
+	// bounded: arming paths that return a token without a liveness proof
+	// (renewal failed inside the probe window, still-fresh token) can
+	// leave the flag set indefinitely — an expiry older than deadCooldown
+	// is treated as disarmed, so a leaked flag cannot make an unrelated
+	// later 401 latch in one strike. Cleared by any successful
+	// authenticated call (clearDead), which can happen without s.mu
+	// (MarkAlive), hence atomic.
+	recoveryProbeAt atomic.Int64
 
 	// infoMu guards the fields read by UI handlers and data requests.
 	infoMu      sync.Mutex
@@ -148,14 +154,33 @@ var deadCooldown = 10 * time.Minute
 // tolerated before the session latches as dead.
 const deadAfterFailures = 2
 
+// armRecovery arms the one-strike recovery window at the current time.
+// May be called with s.mu held.
+func (s *Session) armRecovery() {
+	s.recoveryProbeAt.Store(s.now().Unix())
+}
+
+// recoveryArmed reports whether a fresh (within deadCooldown) one-strike
+// recovery window is armed. Must be called with s.mu held or tolerates a
+// race: the read is atomic.
+func (s *Session) recoveryArmed() bool {
+	armedAt := s.recoveryProbeAt.Load()
+	if armedAt == 0 {
+		return false
+	}
+	return s.now().Sub(time.Unix(armedAt, 0)) <= deadCooldown
+}
+
 // latchDead marks the session dead after the configured number of
 // consecutive failures. Must be called with s.mu held.
 func (s *Session) latchDeadLocked() {
-	// A failed post-cooldown recovery probe latches immediately: the
+	// A failed probe on a fresh recovery window latches immediately: the
 	// session was already latched once and the probe re-confirmed it, so
 	// counting again would only add flapping between probe and failure.
-	if s.recoveryProbe.Load() || s.probeFailures.Add(1) >= deadAfterFailures {
-		s.recoveryProbe.Store(false)
+	// An armed window older than deadCooldown does not count: it leaked
+	// from an arming path that never proved liveness.
+	if s.recoveryArmed() || s.probeFailures.Add(1) >= deadAfterFailures {
+		s.recoveryProbeAt.Store(0)
 		if s.deadSince.CompareAndSwap(0, s.now().Unix()) {
 			s.log.Warn("starlink session latched as dead; a recovery probe runs in " + deadCooldown.String())
 		}
@@ -166,7 +191,7 @@ func (s *Session) latchDeadLocked() {
 // forceLatchDead latches the session dead immediately (definitive evidence
 // such as an expired SSO cookie), bypassing the failure counter.
 func (s *Session) forceLatchDead() {
-	s.recoveryProbe.Store(false)
+	s.recoveryProbeAt.Store(0)
 	if s.deadSince.CompareAndSwap(0, s.now().Unix()) {
 		s.log.Warn("starlink session latched as dead; a recovery probe runs in " + deadCooldown.String())
 	}
@@ -177,16 +202,18 @@ func (s *Session) forceLatchDead() {
 func (s *Session) clearDead() {
 	s.deadSince.Store(0)
 	s.probeFailures.Store(0)
-	s.recoveryProbe.Store(false)
+	s.recoveryProbeAt.Store(0)
 }
 
 // MarkAlive clears the dead latch after a successful authenticated data
 // call, so a recovered API marks the session healthy without waiting for
 // the next probe.
 func (s *Session) MarkAlive() {
-	// A recovery probe that handed out a still-fresh token is only proven
-	// good by the data call that used it; end the one-strike window here.
-	if s.deadSince.Load() != 0 || s.recoveryProbe.Load() {
+	// A recovery attempt that handed out a still-fresh token is only
+	// proven good by the data call that used it; end the one-strike
+	// window here. Armed windows that expired unproven are simply left
+	// to age out.
+	if s.deadSince.Load() != 0 || s.recoveryProbeAt.Load() != 0 {
 		s.clearDead()
 		s.log.Info("starlink session recovered via a successful data call")
 	}
@@ -272,7 +299,7 @@ func (s *Session) Refresh(ctx context.Context) (string, error) {
 		s.log.Info("attempting session recovery probe after cooldown")
 		s.deadSince.Store(0)
 		s.probeFailures.Store(0)
-		s.recoveryProbe.Store(true)
+		s.armRecovery()
 	}
 	if s.token != "" {
 		s.tokenAt = time.Time{} // stale the token so a fresh one is minted
@@ -325,7 +352,7 @@ func (s *Session) ensureTokenLocked(ctx context.Context) (string, error) {
 		s.log.Info("attempting session recovery probe after cooldown")
 		s.deadSince.Store(0)
 		s.probeFailures.Store(0)
-		s.recoveryProbe.Store(true)
+		s.armRecovery()
 	}
 	now := s.now()
 	if s.token != "" && now.Sub(s.tokenAt) < tokenFreshFor {
@@ -387,7 +414,7 @@ func (s *Session) ensureTokenLocked(ctx context.Context) (string, error) {
 		if s.SessionDead() {
 			s.deadSince.Store(0)
 			s.probeFailures.Store(0)
-			s.recoveryProbe.Store(true)
+			s.armRecovery()
 		}
 		// Another caller's probe may have minted a fresh token while we
 		// waited; reuse it instead of probing again.
