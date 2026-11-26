@@ -83,6 +83,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("web setup: %w", err)
 	}
+	srv.SetBilling(starlink.NewBilling(session, cfg.StarlinkAPIBaseURL, log))
 
 	// Metrics: a separate listener so the exposition is not behind the
 	// web app authentication. Bind it to loopback/nebula in production.

@@ -3,10 +3,12 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -863,5 +865,220 @@ func TestAvailableWindowsAlwaysShownAndClamped(t *testing.T) {
 		if w.Selected {
 			t.Errorf("window %q selected though not backed by config", w.Value)
 		}
+	}
+}
+
+// ---------- billing ----------
+
+// billingLineJSON is a roster entry with a subscription block (synthetic).
+const billingLineJSON = `{
+	"serviceLineNumber":"SL-TEST-1","nickname":"Test Dach","canPauseService":true,
+	"userTerminals":[{"userTerminalId":"ut1","serialNumber":"KIT1","active":true,"isOffline":false}],
+	"subscription":{
+		"subscriptionReferenceId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		"productId":"de-test-subscription","productDescription":"Test Residential",
+		"startDate":"2024-06-29T02:11:45.006694+00:00","endDate":null,
+		"subscriptionClass":"Standard","active":true,"canChangeService":true,
+		"canResumeService":false,"pendingActivation":false,
+		"isPaused":false,"isSuspended":false,"isStandby":false
+	}
+}`
+
+const billingOptionsJSON = `{"content":{
+	"currentProduct":{"productId":"de-test-subscription","description":"Test Residential","price":49.0,"customerFacingPrice":50,"isoCurrencyCode":"EUR","isStandby":false},
+	"pendingProduct":null,
+	"changeOptions":[{"productResponse":{
+		"productId":"de-test-plan-100","name":"Test 100 Mbps","description":"Test 100 Mbps","price":35.0,"customerFacingPrice":35,"isoCurrencyCode":"EUR","isStandby":false},
+		"variants":[{"effectiveTimestamp":"2026-12-13T00:00:00+00:00","oneTimeAmount":0,"recurringAmount":35}]}
+	]},"isValid":true}`
+
+// newBillingTestServer starts a fake account API (probe + roster + billing
+// endpoints), builds a cached roster/billing client against it and a web
+// Server wired to both, and returns the web httptest server plus the API
+// server for mutation inspection.
+func newBillingTestServer(t *testing.T) (*Server, *httptest.Server, *int, *[]string) {
+	t.Helper()
+	var mu sync.Mutex
+	changeOptionsHits := 0
+	mutations := []string{}
+	apiMux := http.NewServeMux()
+	apiMux.HandleFunc("/auth-rp/auth/user", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "Starlink.Com.Access.V1", Value: "tok", Path: "/", Domain: "example.test", Secure: true})
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"accountNumber":"ACC-TEST-1"}`)
+	})
+	apiMux.HandleFunc("/webagg/v2/accounts/service-lines", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"content":{"totalCount":1,"isLastPage":true,"results":[%s]},"isValid":true}`, billingLineJSON)
+	})
+	apiMux.HandleFunc("/webagg/v1/public/subscriptions/change-options/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		changeOptionsHits++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, billingOptionsJSON)
+	})
+	apiMux.HandleFunc("/webagg/v1/public/subscriptions/line/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		path := r.URL.Path
+		if r.URL.RawQuery != "" {
+			path += "?" + r.URL.RawQuery
+		}
+		mutations = append(mutations, r.Method+" "+path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"isValid":true}`)
+	})
+	api := httptest.NewServer(apiMux)
+	t.Cleanup(api.Close)
+
+	cfg := testConfig(t)
+	cfg.StarlinkAPIBaseURL = api.URL
+	cfg.StarlinkWebBaseURL = api.URL
+	store := starlink.NewStore(cfg.DataDir, cfg.HistoryWindow, nil)
+	client := &http.Client{Timeout: 10 * time.Second}
+	session := starlink.NewSession(api.URL, api.URL, "test-sso", client, nil)
+	roster := starlink.NewRoster(session, api.URL, time.Minute, nil)
+	billing := starlink.NewBilling(session, api.URL, nil)
+	gw := starlink.NewGateway(nil, cfg.StarlinkWebBaseURL, client, nil)
+	srv, err := New(cfg, auth.LocalDev{}, gw, roster, store, session)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.SetBilling(billing)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return srv, ts, &changeOptionsHits, &mutations
+}
+
+func TestBillingPageRendersLines(t *testing.T) {
+	_, ts, _, _ := newBillingTestServer(t)
+	resp, err := http.Get(ts.URL + "/billing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("billing page status = %d", resp.StatusCode)
+	}
+	html := string(body)
+	for _, want := range []string{
+		"Billing", "SL-TEST-1", "Test Dach", "Test Residential", "Active",
+		"billing_change", "2024-06-29",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("billing page missing %q", want)
+		}
+	}
+}
+
+func TestBillingOptionsEndpoint(t *testing.T) {
+	_, ts, hits, _ := newBillingTestServer(t)
+	for i := 0; i < 2; i++ {
+		resp, err := http.Get(ts.URL + "/api/billing/line/SL-TEST-1/options")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body struct {
+			Current struct {
+				Description string `json:"description"`
+				Price       float64
+			} `json:"current"`
+			Options []struct {
+				Product struct {
+					ProductID   string `json:"productId"`
+					Description string `json:"description"`
+				} `json:"product"`
+			} `json:"options"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("options status = %d", resp.StatusCode)
+		}
+		if body.Current.Description != "Test Residential" || body.Current.Price != 50 {
+			t.Errorf("current plan wrong: %+v", body.Current)
+		}
+		if len(body.Options) != 1 || body.Options[0].Product.ProductID != "de-test-plan-100" {
+			t.Errorf("options wrong: %+v", body.Options)
+		}
+	}
+	if *hits != 1 {
+		t.Errorf("change-options fetched %d times within TTL, want 1", *hits)
+	}
+}
+
+func postBillingJSON(t *testing.T, url string, payload string) (int, map[string]any) {
+	t.Helper()
+	resp, err := http.Post(url, "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	return resp.StatusCode, body
+}
+
+func TestBillingChangeRequiresConfirmAndValidPlan(t *testing.T) {
+	_, ts, _, mutations := newBillingTestServer(t)
+
+	// Wrong confirmation text is rejected before any mutation.
+	code, _ := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/change",
+		`{"productId":"de-test-plan-100","confirm":"wrong"}`)
+	if code != http.StatusBadRequest {
+		t.Errorf("wrong confirm status = %d, want 400", code)
+	}
+	// Unknown plan id is rejected.
+	code, _ = postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/change",
+		`{"productId":"de-does-not-exist","confirm":"whatever"}`)
+	if code != http.StatusBadRequest {
+		t.Errorf("unknown plan status = %d, want 400", code)
+	}
+	if len(*mutations) != 0 {
+		t.Errorf("no mutation should have been attempted, got %v", *mutations)
+	}
+	// Correct confirmation (exact plan description) goes through.
+	code, body := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/change",
+		`{"productId":"de-test-plan-100","confirm":"Test 100 Mbps"}`)
+	if code != http.StatusOK || body["ok"] != true {
+		t.Errorf("valid change: status=%d body=%v", code, body)
+	}
+	if len(*mutations) != 1 || !strings.Contains((*mutations)[0], "POST /webagg/v1/public/subscriptions/line/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/product/de-test-plan-100/update?schedule=false") {
+		t.Errorf("mutation not recorded correctly: %v", *mutations)
+	}
+}
+
+func TestBillingResumeRequiresExactConfirm(t *testing.T) {
+	_, ts, _, mutations := newBillingTestServer(t)
+	code, _ := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/resume", `{"confirm":"resume "}`)
+	if code != http.StatusBadRequest {
+		t.Errorf("wrong confirm (lowercase) status = %d, want 400", code)
+	}
+	code, body := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/resume", `{"confirm":"RESUME"}`)
+	if code != http.StatusOK || body["ok"] != true {
+		t.Errorf("valid resume: status=%d body=%v", code, body)
+	}
+	if len(*mutations) != 1 || (*mutations)[0] != "PUT /webagg/v1/public/subscriptions/line/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resume" {
+		t.Errorf("resume mutation not recorded: %v", *mutations)
+	}
+}
+
+func TestBillingEndpointsUnavailableWithoutClient(t *testing.T) {
+	_, ts := newTestServer(t) // no SetBilling
+	code, _ := postBillingJSON(t, ts.URL+"/api/billing/line/SL-TEST-1/change", `{"productId":"x","confirm":"x"}`)
+	if code != http.StatusServiceUnavailable {
+		t.Errorf("change without client status = %d, want 503", code)
+	}
+	resp, err := http.Get(ts.URL + "/api/billing/line/SL-TEST-1/options")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("options without client status = %d, want 503", resp.StatusCode)
 	}
 }

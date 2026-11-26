@@ -27,6 +27,16 @@ network can still be monitored and controlled through the Starlink cloud.
   The power-save start time is entered in **minutes past midnight UTC** —
   the dish schedule clock is UTC, not local time.
 - **Router view**: connected WiFi clients.
+- **Billing view** (`/billing`): every service line with its current plan,
+  subscription state (active / standby / paused / suspended) and start
+  date. Admins can change a service line's plan (from the options the
+  account API actually offers) and resume a paused line. Both affect real
+  billing, so the UI shows the exact target plan and price and requires a
+  checkbox plus typing the plan name; the server re-validates the typed
+  confirmation against the live options before mutating, and every attempt
+  is logged (plan, service line, outcome). Pausing a pausable line is done
+  by switching its plan to “Standby Mode”. Extending a billing cycle is
+  **not** offered by the account API — only plan changes and resume exist.
 - `/healthz` is unauthenticated for container health checks.
 
 Everything is server-rendered Go templates plus one small dependency-free

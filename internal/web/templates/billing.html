@@ -1,0 +1,56 @@
+{{define "billing"}}{{template "base" .}}{{end}}
+{{define "content"}}
+<div class="page-header">
+  <div class="eyebrow">Subscriptions</div>
+  <h1>Billing &amp; plans.</h1>
+  <p class="muted">Service lines on the account with their current plan and subscription state.
+    Plan changes and resumes take effect on real billing and are restricted to admins;
+    they require an explicit typed confirmation.</p>
+</div>
+
+{{if .Lines}}
+<div class="grid" id="billing-grid">
+  {{range .Lines}}
+  <div class="card device-card" data-sl="{{.ServiceLine}}">
+    <div class="card-head">
+      <span class="device-kind"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M7 15h4"/></svg>Service line</span>
+      <span class="pill {{.StatusClass}}">{{.StatusLabel}}</span>
+    </div>
+    <h3 class="device-name">{{if .Nickname}}{{.Nickname}}{{else}}Unnamed service line{{end}}</h3>
+    <p class="device-location mono">{{.ServiceLine}}</p>
+    <dl class="kv">
+      <dt>Plan</dt><dd>{{if .Plan}}{{.Plan}}{{else}}unknown{{end}}{{if .PlanClass}} <span class="muted">({{.PlanClass}})</span>{{end}}</dd>
+      {{if .SinceText}}<dt>Since</dt><dd>{{.SinceText}}{{if .UntilText}} · until {{.UntilText}}{{end}}</dd>{{end}}
+      <dt>Devices</dt><dd>{{.Terminals}}</dd>
+    </dl>
+    {{if $.AdminUser}}
+    <div class="billing-actions">
+      {{if .CanChange}}
+      <button class="btn" type="button" data-action="billing_change" data-sl="{{.ServiceLine}}">Change plan…</button>
+      {{else}}
+      <span class="muted">Plan changes are not available for this line.</span>
+      {{end}}
+      {{if .CanResume}}
+      <button class="btn" type="button" data-action="billing_resume" data-sl="{{.ServiceLine}}">Resume service…</button>
+      {{end}}
+      {{if and .CanPause (not .CanResume)}}
+      <p class="muted">This line can be paused — pausing is done by switching its plan to “Standby Mode”.</p>
+      {{end}}
+    </div>
+    {{end}}
+    <div class="card-foot"><span>Billing lives in the Starlink account; this view mirrors it.</span></div>
+  </div>
+  {{end}}
+</div>
+{{else}}
+<div class="card empty-card">
+  <h2>No service lines found</h2>
+  <p class="muted">
+    The account roster has no service lines yet, or it could not be fetched.
+    Discovery retries automatically; check the account banner above for errors.
+  </p>
+</div>
+{{end}}
+
+<div class="outcome" id="billing-outcome" role="status" hidden></div>
+{{end}}
