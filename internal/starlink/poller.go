@@ -208,18 +208,29 @@ func (p *Poller) Tick() error {
 	ctx, cancel := context.WithTimeout(p.ctx, max(p.interval*2, 4*p.gateway.CallTimeout()))
 	defer cancel()
 	start := time.Now()
-	defer func() { p.observeRound(time.Since(start)) }()
 
 	dead := p.session.SessionDead()
 	if p.metrics != nil {
 		p.metrics.SetGauge("starlink_session_dead", "", boolFloat(dead))
 	}
+	observeRound := func() {
+		// Only rounds that actually polled feed the histogram; skipped
+		// (session-dead) rounds would record ~0s observations and bias
+		// quantiles during exactly the incident window.
+		if !dead {
+			p.observeRound(time.Since(start))
+		}
+	}
+	defer observeRound()
 	if dead {
 		if !p.session.RecoveryDue() {
 			p.log.Warn("starlink session dead; skipping poll (recovery probe scheduled; update STARLINK_SSO_COOKIE if the cookie expired)")
 			return nil
 		}
 		p.log.Info("session dead latch expired; attempting recovery probe")
+		// From here the round really polls again, so re-enable the
+		// histogram observation for this tick.
+		dead = false
 	}
 
 	// 1. Refresh the roster (cached ~5 min internally).

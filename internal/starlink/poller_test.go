@@ -151,6 +151,7 @@ type recordingSink struct {
 	mu      sync.Mutex
 	gauges  map[string]float64
 	deleted []string
+	hist    map[string][]float64
 }
 
 func (r *recordingSink) SetGauge(name, labels string, v float64) {
@@ -170,7 +171,14 @@ func (r *recordingSink) DeleteDevice(id string) {
 	r.deleted = append(r.deleted, id)
 }
 func (r *recordingSink) IncCounter(string, string)        {}
-func (r *recordingSink) ObserveHistogram(string, float64) {}
+func (r *recordingSink) ObserveHistogram(name string, v float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.hist == nil {
+		r.hist = map[string][]float64{}
+	}
+	r.hist[name] = append(r.hist[name], v)
+}
 
 // A healthy tick reports session_dead=0 (not only the 1 transition), and
 // devices that left the roster have their series removed.
@@ -197,5 +205,60 @@ func TestPollerTickMetrics(t *testing.T) {
 	}
 	if _, ok := sink.gauges["starlink_device_up{ut-gone}"]; ok {
 		t.Error("retired device must not be polled")
+	}
+}
+
+// Skipped rounds (session-dead early return, recovery not yet due) must
+// not feed the poll-duration histogram; only real polling rounds do.
+func TestPollerSkippedRoundNotObserved(t *testing.T) {
+	f, ts := newFakeAPI(t)
+	clock := &fakeClock{now: time.Now()}
+	s := newTestSession(t, ts, clock)
+	oldCooldown := deadCooldown
+	deadCooldown = time.Minute
+	t.Cleanup(func() { deadCooldown = oldCooldown })
+
+	store := NewStore(t.TempDir(), 24*time.Hour, clock.Now)
+	store.UpsertDevice(&Device{ID: "ut-x", Kind: KindDish, Name: "Dish"})
+	p := NewPoller(NewGateway(s, ts.URL, ts.Client(), nil), NewRoster(s, ts.URL, time.Minute, nil),
+		NewTelemetry(s, ts.URL, nil), s, store, 30*time.Second, testLogger(t))
+	sink := &recordingSink{}
+	p.SetMetrics(sink)
+
+	// Latch the session dead with two failed probes (recovery not due
+	// yet: the latch just happened, cooldown is a minute).
+	f.mu.Lock()
+	f.probeStatus = 401
+	f.mu.Unlock()
+	_, _ = s.Token(context.Background())
+	clock.Advance(probeMinInterval + time.Second)
+	_, _ = s.Token(context.Background())
+	if !s.SessionDead() {
+		t.Fatal("setup: session must be latched")
+	}
+
+	if err := p.Tick(); err != nil {
+		t.Fatalf("skipped tick should return nil: %v", err)
+	}
+	sink.mu.Lock()
+	n := len(sink.hist["starlink_poll_round_duration_seconds"])
+	sink.mu.Unlock()
+	if n != 0 {
+		t.Errorf("skipped round recorded %d histogram observations, want 0", n)
+	}
+
+	// A live tick (after recovery) observes exactly one round.
+	f.mu.Lock()
+	f.probeStatus = 200
+	f.mu.Unlock()
+	clock.Advance(2 * time.Minute)
+	if err := p.Tick(); err != nil {
+		t.Fatalf("live tick: %v", err)
+	}
+	sink.mu.Lock()
+	n = len(sink.hist["starlink_poll_round_duration_seconds"])
+	sink.mu.Unlock()
+	if n != 1 {
+		t.Errorf("live round recorded %d histogram observations, want 1", n)
 	}
 }
