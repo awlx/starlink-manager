@@ -8,8 +8,7 @@
     {{.Device.KindLabel}} · {{.Device.ServiceLineName}}
     {{if .Device.Nickname}} · {{.Device.Nickname}}{{end}} ·
     serial <code>{{.Device.SerialNumber}}</code>
-    <span class="pill {{.Device.HealthClass}}" data-field="online">{{.Device.HealthLabel}}</span>
-    {{if .Device.Retired}}<span>Left the roster · history retained for 24 hours; no longer polled.</span>{{end}}
+    {{if .Device.Retired}}<span>Left the roster · history retained for 24 hours; no longer polled.</span>{{else}}<span class="pill {{.Device.HealthClass}}" data-field="online">{{.Device.HealthLabel}}</span>{{end}}
   </p>
 </div>
 
